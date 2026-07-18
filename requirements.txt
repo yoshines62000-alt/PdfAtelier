@@ -2,3 +2,7 @@ pypdf>=6.0
 pypdfium2>=5.0
 reportlab>=4.0
 Pillow>=10.0
+# Optionnel : active le glisser-depose de fichiers depuis l'Explorateur.
+# L'application fonctionne normalement sans lui (boutons "Ajouter..."
+# toujours disponibles), seul le glisser-depose est alors indisponible.
+tkinterdnd2>=0.6.2

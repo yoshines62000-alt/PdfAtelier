@@ -8,6 +8,7 @@ from __future__ import annotations
 import sys
 import webbrowser
 from pathlib import Path
+from typing import Optional
 from tkinter import (
     BOTH, END, HORIZONTAL, LEFT, RIGHT, TOP, X, Y, VERTICAL,
     BooleanVar, Canvas, IntVar, StringVar, Tk, ttk, messagebox, filedialog,
@@ -206,6 +207,115 @@ class PdfAtelierApp:
             if password:
                 passwords[self._resolve(path)] = password
 
+    @staticmethod
+    def _split_dnd_paths(raw_data: str) -> list:
+        """Decoupe la chaine event.data fournie par tkinterdnd2 (chemins
+        entoures d'accolades s'ils contiennent des espaces, separes par des
+        espaces sinon) en une liste de Path.
+
+        N'utilise PAS `widget.tk.splitlist()` : cette fonction Tcl interprete
+        les anti-slashs comme des caracteres d'echappement (ex: "\\t" devient
+        une tabulation), ce qui corromprait silencieusement un chemin Windows
+        parfaitement normal contenant par exemple "...\\Temp\\..." (le "\\t"
+        de "Temp\\" serait lu comme une tabulation). Un decoupage manuel,
+        respectant uniquement le regroupement par accolades sans aucune
+        interpretation des anti-slashs, evite ce risque."""
+        paths = []
+        i, n = 0, len(raw_data)
+        while i < n:
+            if raw_data[i] == " ":
+                i += 1
+                continue
+            if raw_data[i] == "{":
+                end = raw_data.find("}", i)
+                if end == -1:
+                    paths.append(raw_data[i + 1:])
+                    i = n
+                else:
+                    paths.append(raw_data[i + 1:end])
+                    i = end + 1
+            else:
+                end = raw_data.find(" ", i)
+                if end == -1:
+                    end = n
+                paths.append(raw_data[i:end])
+                i = end
+        return [Path(p) for p in paths if p]
+
+    def _handle_pdf_drop(
+        self, raw_paths: list, target_list: list, passwords: Optional[dict] = None, prompt_password: bool = True,
+    ) -> int:
+        """Logique de traitement d'un depose de fichiers PDF, independante du
+        widget/evenement : filtre sur l'extension .pdf, demande un mot de
+        passe si `prompt_password` (memes regles que _add_pdfs_with_password_
+        prompt), ajoute a `target_list`. Renvoie le nombre de fichiers ajoutes."""
+        added = 0
+        for path in raw_paths:
+            if path.suffix.lower() != ".pdf":
+                continue
+            if prompt_password:
+                count, password = self._load_page_count_with_password_prompt(path)
+                if count is None:
+                    continue
+                if password and passwords is not None:
+                    passwords[self._resolve(path)] = password
+            target_list.append(path)
+            added += 1
+        return added
+
+    @staticmethod
+    def _handle_image_drop(raw_paths: list, target_list: list) -> int:
+        """Meme principe que _handle_pdf_drop, pour une liste d'images."""
+        image_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tiff"}
+        added = 0
+        for path in raw_paths:
+            if path.suffix.lower() in image_extensions:
+                target_list.append(path)
+                added += 1
+        return added
+
+    def _register_pdf_drop(
+        self, widget, target_list: list, reload_fn, passwords: Optional[dict] = None, prompt_password: bool = True,
+    ):
+        """Autorise le glisser-depose de fichiers PDF depuis l'Explorateur
+        Windows directement sur `widget` (listbox), comme alternative au
+        bouton "Ajouter...". Sans effet (ni erreur) si tkinterdnd2 n'est pas
+        installe ou si le widget ne supporte pas le drop sur cette
+        plateforme - le bouton Ajouter reste toujours disponible.
+
+        prompt_password=False reproduit le comportement des onglets qui ne
+        demandent pas le mot de passe a l'ajout (Fusionner, Protection) -
+        un fichier protege y est simplement ajoute tel quel, l'echec eventuel
+        etant gere plus tard au moment du traitement."""
+        try:
+            from tkinterdnd2 import DND_FILES
+            widget.drop_target_register(DND_FILES)
+        except Exception:
+            return
+
+        def on_drop(event):
+            raw_paths = self._split_dnd_paths(event.data)
+            self._handle_pdf_drop(raw_paths, target_list, passwords, prompt_password)
+            reload_fn()
+
+        widget.dnd_bind("<<Drop>>", on_drop)
+
+    def _register_image_drop(self, widget, target_list: list, reload_fn):
+        """Meme principe que _register_pdf_drop, pour une liste d'images
+        (onglet Images vers PDF)."""
+        try:
+            from tkinterdnd2 import DND_FILES
+            widget.drop_target_register(DND_FILES)
+        except Exception:
+            return
+
+        def on_drop(event):
+            raw_paths = self._split_dnd_paths(event.data)
+            self._handle_image_drop(raw_paths, target_list)
+            reload_fn()
+
+        widget.dnd_bind("<<Drop>>", on_drop)
+
     def _resolve_batch_outputs(self, sources: list, single_output_initial_name: str, batch_suffix: str):
         """Determine ou enregistrer le(s) resultat(s) : un seul fichier
         choisi explicitement s'il n'y a qu'une seule source (comportement
@@ -267,6 +377,10 @@ class PdfAtelierApp:
         body.pack(fill=BOTH, expand=True, padx=10, pady=5)
         self.merge_listbox = ttk_listbox(body)
         self.merge_listbox.pack(side=LEFT, fill=BOTH, expand=True)
+        self._register_pdf_drop(
+            self.merge_listbox, self.merge_files,
+            lambda: self._reload_listbox(self.merge_listbox, self.merge_files), prompt_password=False,
+        )
 
         buttons = ttk.Frame(body)
         buttons.pack(side=LEFT, fill=Y, padx=(10, 0))
@@ -553,6 +667,10 @@ class PdfAtelierApp:
         top.pack(fill=X, padx=10, pady=10)
         self.compress_listbox = ttk_listbox(top, height=5)
         self.compress_listbox.pack(side=LEFT, fill=X, expand=True)
+        self._register_pdf_drop(
+            self.compress_listbox, self.compress_sources,
+            lambda: self._reload_listbox(self.compress_listbox, self.compress_sources), self.compress_passwords,
+        )
         buttons = ttk.Frame(top)
         buttons.pack(side=LEFT, padx=(10, 0))
         ttk.Button(buttons, text="Ajouter...", command=self._compress_add_files).pack(fill=X, pady=2)
@@ -673,6 +791,9 @@ class PdfAtelierApp:
         body.pack(fill=BOTH, expand=True, padx=5, pady=5)
         self.i2p_listbox = ttk_listbox(body)
         self.i2p_listbox.pack(side=LEFT, fill=BOTH, expand=True)
+        self._register_image_drop(
+            self.i2p_listbox, self.i2p_files, lambda: self._reload_listbox(self.i2p_listbox, self.i2p_files),
+        )
 
         buttons = ttk.Frame(body)
         buttons.pack(side=LEFT, fill=Y, padx=(10, 0))
@@ -750,6 +871,10 @@ class PdfAtelierApp:
         top.pack(fill=X, padx=10, pady=10)
         self.watermark_listbox = ttk_listbox(top, height=5)
         self.watermark_listbox.pack(side=LEFT, fill=X, expand=True)
+        self._register_pdf_drop(
+            self.watermark_listbox, self.watermark_sources,
+            lambda: self._reload_listbox(self.watermark_listbox, self.watermark_sources), self.watermark_passwords,
+        )
         buttons = ttk.Frame(top)
         buttons.pack(side=LEFT, padx=(10, 0))
         ttk.Button(buttons, text="Ajouter...", command=self._watermark_add_files).pack(fill=X, pady=2)
@@ -834,6 +959,10 @@ class PdfAtelierApp:
         top.pack(fill=X, padx=10, pady=10)
         self.protect_listbox = ttk_listbox(top, height=5)
         self.protect_listbox.pack(side=LEFT, fill=X, expand=True)
+        self._register_pdf_drop(
+            self.protect_listbox, self.protect_sources,
+            lambda: self._reload_listbox(self.protect_listbox, self.protect_sources), prompt_password=False,
+        )
         buttons = ttk.Frame(top)
         buttons.pack(side=LEFT, padx=(10, 0))
         ttk.Button(buttons, text="Ajouter...", command=self._protect_add_files).pack(fill=X, pady=2)
@@ -974,7 +1103,17 @@ def ttk_listbox(parent, height=12):
 
 
 def main():
-    root = Tk()
+    try:
+        # TkinterDnD.Tk() est un Tk normal auquel s'ajoute le support du
+        # glisser-depose de fichiers (drop_target_register/dnd_bind) : sans
+        # lui, ces methodes n'existent pas sur les widgets et le glisser-
+        # depose est silencieusement ignore (voir _register_pdf_drop). Si
+        # le paquet n'est pas installe, on retombe sur un Tk standard - seul
+        # le glisser-depose est indisponible, tout le reste fonctionne.
+        from tkinterdnd2 import TkinterDnD
+        root = TkinterDnD.Tk()
+    except ImportError:
+        root = Tk()
     PdfAtelierApp(root)
     root.mainloop()
 
