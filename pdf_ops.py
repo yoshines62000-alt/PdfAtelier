@@ -148,12 +148,18 @@ def reorder_and_filter_pages(
 class CompressionResult:
     original_size: int
     compressed_size: int
+    images_recompressed: int = 0
+    images_total: int = 0
 
     @property
     def ratio_percent(self) -> float:
         if self.original_size == 0:
             return 0.0
         return round(100 * (1 - self.compressed_size / self.original_size), 1)
+
+    @property
+    def images_failed(self) -> int:
+        return self.images_total - self.images_recompressed
 
 
 def compress_pdf(
@@ -171,8 +177,11 @@ def compress_pdf(
     # compress_content_streams() (qui exige une page rattachee a un writer)
     # et le remplacement d'image fonctionnent tous deux sur les memes objets.
     writer.append(reader)
+    images_total = 0
+    images_recompressed = 0
     for page in writer.pages:
         for img in page.images:
+            images_total += 1
             try:
                 image = img.image
                 if image is None:
@@ -182,17 +191,21 @@ def compress_pdf(
                 if max(image.size) > max_dimension:
                     image.thumbnail((max_dimension, max_dimension))
                 img.replace(image, quality=image_quality)
+                images_recompressed += 1
             except Exception:
                 # Certains formats d'image embarques (ex: CMYK, masques de
                 # transparence particuliers, image corrompue) ne se laissent
                 # pas toujours decoder/remplacer proprement : on garde alors
                 # l'image d'origine plutot que de faire echouer toute la
-                # compression pour une seule image problematique.
+                # compression pour une seule image problematique. On
+                # comptabilise l'echec plutot que de le passer sous silence,
+                # pour que l'utilisateur comprenne un taux de reduction
+                # plus faible que prevu.
                 continue
         page.compress_content_streams()
     _write_output(writer, output_path)
     compressed_size = Path(output_path).stat().st_size
-    return CompressionResult(original_size, compressed_size)
+    return CompressionResult(original_size, compressed_size, images_recompressed, images_total)
 
 
 # -- conversion image <-> PDF ---------------------------------------------------

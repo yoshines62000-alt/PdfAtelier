@@ -192,6 +192,69 @@ class PdfAtelierApp:
         for item in items:
             listbox.insert(END, Path(item).name)
 
+    def _add_pdfs_with_password_prompt(self, existing_paths: list, passwords: dict):
+        """Ajoute des fichiers PDF choisis par l'utilisateur a `existing_paths`
+        (modifie en place), en demandant un mot de passe immediatement pour
+        tout fichier protege et en le stockant dans `passwords` (modifie en
+        place, cle = chemin resolu). Un fichier dont le mot de passe est
+        annule/incorrect n'est pas ajoute a la liste."""
+        for path in self._pick_pdfs():
+            count, password = self._load_page_count_with_password_prompt(path)
+            if count is None:
+                continue
+            existing_paths.append(path)
+            if password:
+                passwords[self._resolve(path)] = password
+
+    def _resolve_batch_outputs(self, sources: list, single_output_initial_name: str, batch_suffix: str):
+        """Determine ou enregistrer le(s) resultat(s) : un seul fichier
+        choisi explicitement s'il n'y a qu'une seule source (comportement
+        historique inchange), ou un dossier + un nom genere par fichier
+        source s'il y en a plusieurs. Renvoie une liste de tuples
+        (source, output) ou None si l'utilisateur annule."""
+        if len(sources) == 1:
+            output = self._save_pdf_as(single_output_initial_name)
+            if not output:
+                return None
+            if not self._warn_if_output_overwrites_source(sources, output):
+                return None
+            return [(sources[0], output)]
+
+        output_dir = filedialog.askdirectory(title="Dossier de destination")
+        if not output_dir:
+            return None
+        pairs = [(src, Path(output_dir) / f"{src.stem}{batch_suffix}.pdf") for src in sources]
+        for src, out in pairs:
+            if not self._warn_if_output_overwrites_source(sources, out):
+                return None
+        return pairs
+
+    def _run_batch(self, pairs: list, action_for_pair):
+        """Execute action_for_pair(source, output) pour chaque paire, sans
+        jamais interrompre les autres fichiers sur l'echec de l'un (chaque
+        erreur, attendue ou non, est capturee individuellement). Renvoie
+        (succes, echecs) : succes est une liste de (source, output,
+        resultat_de_l_action), echecs une liste de (source, message)."""
+        successes, failures = [], []
+        for source, output in pairs:
+            try:
+                result = action_for_pair(source, output)
+            except ops.PdfOpsError as exc:
+                failures.append((source, str(exc)))
+            except Exception as exc:
+                failures.append((source, f"erreur inattendue : {exc}"))
+            else:
+                successes.append((source, output, result))
+        return successes, failures
+
+    def _show_batch_summary(self, successes: list, failures: list, verb: str):
+        lines = [f"{len(successes)} fichier(s) {verb} avec succes."]
+        if failures:
+            lines.append(f"{len(failures)} echec(s) :")
+            for source, message in failures:
+                lines.append(f"  - {source.name} : {message}")
+        messagebox.showinfo(APP_TITLE, "\n".join(lines))
+
     # -- onglet Fusionner -------------------------------------------------------
 
     def _build_merge_tab(self):
@@ -480,17 +543,21 @@ class PdfAtelierApp:
 
     def _build_compress_tab(self):
         frame = self.compress_tab
-        self.compress_source_path = None
-        self.compress_source_password = None
-        self.compress_source_var = StringVar(value="Aucun fichier choisi")
+        self.compress_sources: list = []
+        self.compress_passwords: dict = {}
         self.compress_quality_var = IntVar(value=60)
         self.compress_max_dim_var = IntVar(value=1600)
         self.compress_result_var = StringVar(value="")
 
         top = ttk.Frame(frame)
         top.pack(fill=X, padx=10, pady=10)
-        ttk.Button(top, text="Choisir un PDF...", command=self._compress_pick_source).pack(side=LEFT)
-        ttk.Label(top, textvariable=self.compress_source_var).pack(side=LEFT, padx=10)
+        self.compress_listbox = ttk_listbox(top, height=5)
+        self.compress_listbox.pack(side=LEFT, fill=X, expand=True)
+        buttons = ttk.Frame(top)
+        buttons.pack(side=LEFT, padx=(10, 0))
+        ttk.Button(buttons, text="Ajouter...", command=self._compress_add_files).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Retirer", command=self._compress_remove_selected).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Vider", command=self._compress_clear).pack(fill=X, pady=2)
 
         ttk.Label(frame, text="Qualite des images (1 = tres compresse, 95 = quasi sans perte)").pack(anchor="w", padx=10, pady=(15, 0))
         ttk.Scale(frame, from_=1, to=95, orient=HORIZONTAL, variable=self.compress_quality_var, length=300).pack(anchor="w", padx=10)
@@ -501,47 +568,77 @@ class PdfAtelierApp:
         ttk.Button(frame, text="Compresser...", command=self._compress_run).pack(anchor="w", padx=10, pady=15)
         ttk.Label(frame, textvariable=self.compress_result_var).pack(anchor="w", padx=10)
 
-    def _compress_pick_source(self):
-        path = self._pick_pdf()
-        if not path:
-            return
-        count, password = self._load_page_count_with_password_prompt(path)
-        if count is None:
-            return
-        self.compress_source_path = path
-        self.compress_source_password = password
-        self.compress_source_var.set(path.name)
+    def _compress_add_files(self):
+        self._add_pdfs_with_password_prompt(self.compress_sources, self.compress_passwords)
+        self._reload_listbox(self.compress_listbox, self.compress_sources)
         self.compress_result_var.set("")
 
+    def _compress_remove_selected(self):
+        selection = self.compress_listbox.curselection()
+        if not selection:
+            return
+        del self.compress_sources[selection[0]]
+        self._reload_listbox(self.compress_listbox, self.compress_sources)
+
+    def _compress_clear(self):
+        self.compress_sources.clear()
+        self.compress_passwords.clear()
+        self._reload_listbox(self.compress_listbox, self.compress_sources)
+
     def _compress_run(self):
-        if not self.compress_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+        if not self.compress_sources:
+            messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
             return
-        output = self._save_pdf_as("compresse.pdf")
-        if not output:
-            return
-        if not self._warn_if_output_overwrites_source(self.compress_source_path, output):
+        pairs = self._resolve_batch_outputs(self.compress_sources, "compresse.pdf", "_compresse")
+        if pairs is None:
             return
 
-        def action():
-            # Lues ici (dans action(), execute par _run_safely) et non avant :
-            # un champ non numerique leverait TclError, qui doit etre
-            # capturee par _run_safely plutot que de faire planter le
-            # callback silencieusement.
+        try:
+            # Lues une seule fois ici (pas par fichier) et non avant l'appel :
+            # un champ non numerique leverait TclError.
             quality = self.compress_quality_var.get()
             max_dim = self.compress_max_dim_var.get()
-            return ops.compress_pdf(
-                self.compress_source_path, output, image_quality=quality,
-                max_dimension=max_dim, password=self.compress_source_password,
-            )
+        except Exception as exc:
+            messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+            return
 
-        result = self._run_safely(action)
-        if result is not None:
-            self.compress_result_var.set(
-                f"{_format_size(result.original_size)} -> {_format_size(result.compressed_size)} "
-                f"({result.ratio_percent:g} % de reduction)"
+        if len(pairs) == 1:
+            source, output = pairs[0]
+            result = self._run_safely(
+                lambda: ops.compress_pdf(
+                    source, output, image_quality=quality, max_dimension=max_dim,
+                    password=self.compress_passwords.get(self._resolve(source)),
+                )
             )
-            messagebox.showinfo(APP_TITLE, f"PDF compresse enregistre : {output.name}")
+            if result is not None:
+                summary = (
+                    f"{_format_size(result.original_size)} -> {_format_size(result.compressed_size)} "
+                    f"({result.ratio_percent:g} % de reduction)"
+                )
+                if result.images_failed:
+                    summary += (
+                        f" - {result.images_failed}/{result.images_total} image(s) n'ont pas pu etre "
+                        "recompressees (format non supporte) et ont ete conservees telles quelles"
+                    )
+                self.compress_result_var.set(summary)
+                messagebox.showinfo(APP_TITLE, f"PDF compresse enregistre : {output.name}")
+            return
+
+        successes, failures = self._run_batch(
+            pairs,
+            lambda source, output: ops.compress_pdf(
+                source, output, image_quality=quality, max_dimension=max_dim,
+                password=self.compress_passwords.get(self._resolve(source)),
+            ),
+        )
+        if successes:
+            total_original = sum(r.original_size for _, _, r in successes)
+            total_compressed = sum(r.compressed_size for _, _, r in successes)
+            ratio = round(100 * (1 - total_compressed / total_original), 1) if total_original else 0.0
+            self.compress_result_var.set(
+                f"{_format_size(total_original)} -> {_format_size(total_compressed)} ({ratio:g} % de reduction au total)"
+            )
+        self._show_batch_summary(successes, failures, "compresse(s)")
 
     # -- onglet Convertir -----------------------------------------------------------
 
@@ -642,9 +739,8 @@ class PdfAtelierApp:
 
     def _build_watermark_tab(self):
         frame = self.watermark_tab
-        self.watermark_source_path = None
-        self.watermark_source_password = None
-        self.watermark_source_var = StringVar(value="Aucun fichier choisi")
+        self.watermark_sources: list = []
+        self.watermark_passwords: dict = {}
         self.watermark_text_var = StringVar(value="CONFIDENTIEL")
         self.watermark_opacity_var = IntVar(value=30)
         self.watermark_angle_var = IntVar(value=45)
@@ -652,8 +748,13 @@ class PdfAtelierApp:
 
         top = ttk.Frame(frame)
         top.pack(fill=X, padx=10, pady=10)
-        ttk.Button(top, text="Choisir un PDF...", command=self._watermark_pick_source).pack(side=LEFT)
-        ttk.Label(top, textvariable=self.watermark_source_var).pack(side=LEFT, padx=10)
+        self.watermark_listbox = ttk_listbox(top, height=5)
+        self.watermark_listbox.pack(side=LEFT, fill=X, expand=True)
+        buttons = ttk.Frame(top)
+        buttons.pack(side=LEFT, padx=(10, 0))
+        ttk.Button(buttons, text="Ajouter...", command=self._watermark_add_files).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Retirer", command=self._watermark_remove_selected).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Vider", command=self._watermark_clear).pack(fill=X, pady=2)
 
         ttk.Label(frame, text="Texte du filigrane").pack(anchor="w", padx=10, pady=(10, 0))
         ttk.Entry(frame, textvariable=self.watermark_text_var, width=40).pack(anchor="w", padx=10)
@@ -670,55 +771,74 @@ class PdfAtelierApp:
 
         ttk.Button(frame, text="Appliquer le filigrane...", command=self._watermark_run).pack(anchor="w", padx=10, pady=15)
 
-    def _watermark_pick_source(self):
-        path = self._pick_pdf()
-        if not path:
+    def _watermark_add_files(self):
+        self._add_pdfs_with_password_prompt(self.watermark_sources, self.watermark_passwords)
+        self._reload_listbox(self.watermark_listbox, self.watermark_sources)
+
+    def _watermark_remove_selected(self):
+        selection = self.watermark_listbox.curselection()
+        if not selection:
             return
-        count, password = self._load_page_count_with_password_prompt(path)
-        if count is None:
-            return
-        self.watermark_source_path = path
-        self.watermark_source_password = password
-        self.watermark_source_var.set(path.name)
+        del self.watermark_sources[selection[0]]
+        self._reload_listbox(self.watermark_listbox, self.watermark_sources)
+
+    def _watermark_clear(self):
+        self.watermark_sources.clear()
+        self.watermark_passwords.clear()
+        self._reload_listbox(self.watermark_listbox, self.watermark_sources)
 
     def _watermark_run(self):
-        if not self.watermark_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+        if not self.watermark_sources:
+            messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
             return
         text = self.watermark_text_var.get().strip()
         if not text:
             messagebox.showwarning(APP_TITLE, "Le texte du filigrane ne peut pas etre vide.")
             return
-        output = self._save_pdf_as("filigrane.pdf")
-        if not output:
-            return
-        if not self._warn_if_output_overwrites_source(self.watermark_source_path, output):
+        pairs = self._resolve_batch_outputs(self.watermark_sources, "filigrane.pdf", "_filigrane")
+        if pairs is None:
             return
 
-        def action():
+        try:
             opacity = self.watermark_opacity_var.get() / 100.0
+            font_size = self.watermark_size_var.get()
+            angle = self.watermark_angle_var.get()
+        except Exception as exc:
+            messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+            return
+
+        def make_action(source, output):
             return ops.add_text_watermark(
-                self.watermark_source_path, output, text,
-                opacity=opacity, font_size=self.watermark_size_var.get(), angle=self.watermark_angle_var.get(),
-                password=self.watermark_source_password,
+                source, output, text, opacity=opacity, font_size=font_size, angle=angle,
+                password=self.watermark_passwords.get(self._resolve(source)),
             )
 
-        self._run_safely(action, f"Filigrane applique : {output.name}")
+        if len(pairs) == 1:
+            source, output = pairs[0]
+            self._run_safely(lambda: make_action(source, output), f"Filigrane applique : {output.name}")
+            return
+
+        successes, failures = self._run_batch(pairs, make_action)
+        self._show_batch_summary(successes, failures, "traite(s) (filigrane applique)")
 
     # -- onglet Protection ------------------------------------------------------------
 
     def _build_protect_tab(self):
         frame = self.protect_tab
-        self.protect_source_path = None
-        self.protect_source_var = StringVar(value="Aucun fichier choisi")
+        self.protect_sources: list = []
         self.protect_mode_var = StringVar(value="add")
         self.protect_password_var = StringVar()
         self.protect_confirm_var = StringVar()
 
         top = ttk.Frame(frame)
         top.pack(fill=X, padx=10, pady=10)
-        ttk.Button(top, text="Choisir un PDF...", command=self._protect_pick_source).pack(side=LEFT)
-        ttk.Label(top, textvariable=self.protect_source_var).pack(side=LEFT, padx=10)
+        self.protect_listbox = ttk_listbox(top, height=5)
+        self.protect_listbox.pack(side=LEFT, fill=X, expand=True)
+        buttons = ttk.Frame(top)
+        buttons.pack(side=LEFT, padx=(10, 0))
+        ttk.Button(buttons, text="Ajouter...", command=self._protect_add_files).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Retirer", command=self._protect_remove_selected).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Vider", command=self._protect_clear).pack(fill=X, pady=2)
 
         ttk.Radiobutton(frame, text="Ajouter un mot de passe", variable=self.protect_mode_var, value="add").pack(anchor="w", padx=10, pady=(10, 0))
         ttk.Radiobutton(frame, text="Retirer le mot de passe", variable=self.protect_mode_var, value="remove").pack(anchor="w", padx=10)
@@ -731,18 +851,31 @@ class PdfAtelierApp:
         self.protect_confirm_entry = ttk.Entry(frame, textvariable=self.protect_confirm_var, show="*", width=30)
         self.protect_confirm_entry.pack(anchor="w", padx=10)
 
+        ttk.Label(
+            frame, text="En mode lot (plusieurs fichiers), le meme mot de passe est applique/retire sur chacun.",
+            foreground="#666",
+        ).pack(anchor="w", padx=10, pady=(10, 0))
+
         ttk.Button(frame, text="Appliquer...", command=self._protect_run).pack(anchor="w", padx=10, pady=15)
 
-    def _protect_pick_source(self):
-        path = self._pick_pdf()
-        if not path:
+    def _protect_add_files(self):
+        self.protect_sources.extend(self._pick_pdfs())
+        self._reload_listbox(self.protect_listbox, self.protect_sources)
+
+    def _protect_remove_selected(self):
+        selection = self.protect_listbox.curselection()
+        if not selection:
             return
-        self.protect_source_path = path
-        self.protect_source_var.set(path.name)
+        del self.protect_sources[selection[0]]
+        self._reload_listbox(self.protect_listbox, self.protect_sources)
+
+    def _protect_clear(self):
+        self.protect_sources.clear()
+        self._reload_listbox(self.protect_listbox, self.protect_sources)
 
     def _protect_run(self):
-        if not self.protect_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+        if not self.protect_sources:
+            messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
             return
         password = self.protect_password_var.get()
         mode = self.protect_mode_var.get()
@@ -751,25 +884,27 @@ class PdfAtelierApp:
             if password != self.protect_confirm_var.get():
                 messagebox.showwarning(APP_TITLE, "Les deux mots de passe ne correspondent pas.")
                 return
-            output = self._save_pdf_as("protege.pdf")
-            if not output:
+            pairs = self._resolve_batch_outputs(self.protect_sources, "protege.pdf", "_protege")
+            if pairs is None:
                 return
-            if not self._warn_if_output_overwrites_source(self.protect_source_path, output):
-                return
-            self._run_safely(
-                lambda: ops.set_password(self.protect_source_path, output, password),
-                f"PDF protege enregistre : {output.name}",
-            )
+            make_action = lambda source, output: ops.set_password(source, output, password)
+            success_verb = "protege(s)"
+            single_message = lambda output: f"PDF protege enregistre : {output.name}"
         else:
-            output = self._save_pdf_as("sans_mot_de_passe.pdf")
-            if not output:
+            pairs = self._resolve_batch_outputs(self.protect_sources, "sans_mot_de_passe.pdf", "_sans_mot_de_passe")
+            if pairs is None:
                 return
-            if not self._warn_if_output_overwrites_source(self.protect_source_path, output):
-                return
-            self._run_safely(
-                lambda: ops.remove_password(self.protect_source_path, output, password),
-                f"Protection retiree : {output.name}",
-            )
+            make_action = lambda source, output: ops.remove_password(source, output, password)
+            success_verb = "deprotege(s)"
+            single_message = lambda output: f"Protection retiree : {output.name}"
+
+        if len(pairs) == 1:
+            source, output = pairs[0]
+            self._run_safely(lambda: make_action(source, output), single_message(output))
+            return
+
+        successes, failures = self._run_batch(pairs, make_action)
+        self._show_batch_summary(successes, failures, success_verb)
 
     # -- onglet Texte -------------------------------------------------------------------
 

@@ -158,6 +158,34 @@ class PdfOpsTestCase(unittest.TestCase):
         # produire un fichier nettement plus petit.
         self.assertLess(result.compressed_size, result.original_size)
         self.assertGreater(result.ratio_percent, 0)
+        self.assertEqual(result.images_total, 1)
+        self.assertEqual(result.images_recompressed, 1)
+        self.assertEqual(result.images_failed, 0)
+
+    def test_compress_pdf_counts_images_that_fail_to_recompress(self):
+        # Simule un echec de remplacement d'image (format non supporte,
+        # image corrompue...) pour verifier que compress_pdf continue sans
+        # planter ET comptabilise l'echec au lieu de l'avaler silencieusement.
+        import os
+        from unittest.mock import patch
+        image_path = self.tmp / "photo2.png"
+        size = (400, 400)
+        Image.frombytes("RGB", size, os.urandom(size[0] * size[1] * 3)).save(image_path)
+        pdf = make_pdf_with_image(self.tmp / "with_image2.pdf", image_path)
+        output = self.tmp / "compressed2.pdf"
+
+        from pypdf._page import ImageFile
+        with patch.object(ImageFile, "replace", side_effect=RuntimeError("format non supporte")):
+            result = ops.compress_pdf(pdf, output, image_quality=40, max_dimension=300)
+
+        self.assertTrue(output.exists())
+        self.assertEqual(result.images_total, 1)
+        self.assertEqual(result.images_recompressed, 0)
+        self.assertEqual(result.images_failed, 1)
+
+    def test_compression_result_images_failed_counts_unrecompressed_images(self):
+        result = ops.CompressionResult(original_size=100, compressed_size=90, images_recompressed=2, images_total=5)
+        self.assertEqual(result.images_failed, 3)
 
     def test_compression_result_ratio_percent_with_zero_original_size(self):
         result = ops.CompressionResult(original_size=0, compressed_size=0)
