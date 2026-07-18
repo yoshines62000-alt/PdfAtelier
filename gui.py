@@ -1163,11 +1163,29 @@ class PdfAtelierApp:
         ttk.Entry(top, textvariable=self.text_password_var, show="*", width=20).pack(side=LEFT, padx=5)
         ttk.Button(top, text="Extraire", command=self._text_run).pack(side=LEFT, padx=10)
 
+        self.text_search_var = StringVar()
+        self.text_search_status_var = StringVar(value="")
+        self._text_search_matches: list = []
+        self._text_search_index = -1
+
+        search_row = ttk.Frame(frame)
+        search_row.pack(fill=X, padx=10, pady=(0, 5))
+        ttk.Label(search_row, text="Rechercher :").pack(side=LEFT)
+        search_entry = ttk.Entry(search_row, textvariable=self.text_search_var, width=30)
+        search_entry.pack(side=LEFT, padx=5)
+        search_entry.bind("<Return>", lambda event: self._text_search_run())
+        ttk.Button(search_row, text="Chercher", command=self._text_search_run).pack(side=LEFT)
+        ttk.Button(search_row, text="Precedent", command=lambda: self._text_search_step(-1)).pack(side=LEFT, padx=(10, 0))
+        ttk.Button(search_row, text="Suivant", command=lambda: self._text_search_step(1)).pack(side=LEFT, padx=(5, 0))
+        ttk.Label(search_row, textvariable=self.text_search_status_var).pack(side=LEFT, padx=10)
+
         body = ttk.Frame(frame)
         body.pack(fill=BOTH, expand=True, padx=10, pady=5)
         scrollbar = ttk.Scrollbar(body, orient=VERTICAL)
         from tkinter import Text
         self.text_output = Text(body, wrap="word", yscrollcommand=scrollbar.set)
+        self.text_output.tag_configure("search_match", background="#fff59d")
+        self.text_output.tag_configure("search_current", background="#ffb300")
         scrollbar.config(command=self.text_output.yview)
         self.text_output.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
@@ -1191,6 +1209,52 @@ class PdfAtelierApp:
             self.text_output.delete("1.0", END)
             for index, page_text in enumerate(result, start=1):
                 self.text_output.insert(END, f"--- Page {index} ---\n{page_text}\n\n")
+            self._text_search_matches = []
+            self._text_search_index = -1
+            self.text_search_status_var.set("")
+
+    def _text_search_run(self):
+        self.text_output.tag_remove("search_match", "1.0", END)
+        self.text_output.tag_remove("search_current", "1.0", END)
+        self._text_search_matches = []
+        self._text_search_index = -1
+        query = self.text_search_var.get()
+        if not query:
+            self.text_search_status_var.set("")
+            return
+        start = "1.0"
+        while True:
+            pos = self.text_output.search(query, start, stopindex=END, nocase=True)
+            if not pos:
+                break
+            end = f"{pos}+{len(query)}c"
+            self.text_output.tag_add("search_match", pos, end)
+            self._text_search_matches.append(pos)
+            start = end
+        if self._text_search_matches:
+            self._text_search_index = 0
+            self._text_search_highlight_current()
+        else:
+            self.text_search_status_var.set("Aucun resultat")
+
+    def _text_search_highlight_current(self):
+        self.text_output.tag_remove("search_current", "1.0", END)
+        if not (0 <= self._text_search_index < len(self._text_search_matches)):
+            return
+        pos = self._text_search_matches[self._text_search_index]
+        end = f"{pos}+{len(self.text_search_var.get())}c"
+        self.text_output.tag_add("search_current", pos, end)
+        self.text_output.see(pos)
+        self.text_search_status_var.set(f"{self._text_search_index + 1}/{len(self._text_search_matches)}")
+
+    def _text_search_step(self, delta: int):
+        if not self._text_search_matches:
+            self._text_search_run()
+            if not self._text_search_matches:
+                return
+            return
+        self._text_search_index = (self._text_search_index + delta) % len(self._text_search_matches)
+        self._text_search_highlight_current()
 
     def _text_save(self):
         content = self.text_output.get("1.0", END).strip()
