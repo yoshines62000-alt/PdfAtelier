@@ -393,9 +393,28 @@ def extract_embedded_images(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_paths = []
+    # Deux appels vers le meme dossier (meme PDF extrait deux fois, ou deux
+    # PDF de meme nom depuis des dossiers differents) produiraient sinon des
+    # noms de fichier identiques et le second ecraserait silencieusement le
+    # premier - bug trouve a l'audit (contrairement a _resolve_batch_outputs
+    # cote GUI, qui protege deja Filigrane/Protection/Numeroter contre
+    # exactement ce cas, jamais applique ici).
+    used_paths = set()
     for page_index, page in enumerate(reader.pages, start=1):
-        for image_index, image_file in enumerate(page.images, start=1):
+        # Indexation manuelle (pas `for image_file in page.images`) : accéder
+        # a `page.images[i]` est ce qui declenche reellement le decodage de
+        # l'image (via pypdf), et c'est exactement ce qui peut lever une
+        # exception sur un flux corrompu. Boucler directement sur l'iterateur
+        # de page.images ferait lever cette exception PENDANT l'evaluation de
+        # la boucle for elle-meme, avant meme d'atteindre le `try:` ci-dessous
+        # - abandonnant alors l'extraction de TOUTE la page (voire du
+        # document, l'exception remontant hors de la fonction), au lieu de
+        # sauter uniquement l'image fautive (bug trouve a l'audit : le
+        # `try` commencait une ligne trop tard pour proteger contre ca).
+        image_count = len(page.images)
+        for image_index in range(1, image_count + 1):
             try:
+                image_file = page.images[image_index - 1]
                 image = image_file.image
                 if image is None:
                     continue
@@ -406,9 +425,15 @@ def extract_embedded_images(
                 else:
                     ext = "png"
                     save_image = image
-                output_path = output_dir / f"{base_name}_p{page_index:03d}_img{image_index:02d}.{ext}"
+                stem = f"{base_name}_p{page_index:03d}_img{image_index:02d}"
+                output_path = output_dir / f"{stem}.{ext}"
+                counter = 1
+                while output_path.exists() or output_path in used_paths:
+                    output_path = output_dir / f"{stem} ({counter}).{ext}"
+                    counter += 1
+                used_paths.add(output_path)
                 save_image.save(output_path)
                 output_paths.append(output_path)
-            except (OSError, ValueError):
+            except (OSError, ValueError, KeyError):
                 continue
     return output_paths

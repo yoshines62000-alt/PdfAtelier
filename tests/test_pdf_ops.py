@@ -10,11 +10,60 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import DictionaryObject, NameObject, NumberObject, StreamObject
 from PIL import Image
 from reportlab.pdfgen import canvas
 
 import pdf_ops as ops
+
+
+def _add_dct_image_xobject(writer: PdfWriter, page, name: str, jpeg_bytes: bytes, width: int, height: int):
+    """Ajoute un XObject image brut (flux DCTDecode) a `page` - utilise pour
+    construire une image sciemment corrompue (flux illisible) et une image
+    valide (vrais octets JPEG) via le meme mecanisme bas niveau, sans
+    dependre d'une API haut niveau de pypdf pour l'insertion d'images."""
+    image_obj = StreamObject()
+    image_obj.set_data(jpeg_bytes)
+    image_obj[NameObject("/Type")] = NameObject("/XObject")
+    image_obj[NameObject("/Subtype")] = NameObject("/Image")
+    image_obj[NameObject("/Width")] = NumberObject(width)
+    image_obj[NameObject("/Height")] = NumberObject(height)
+    image_obj[NameObject("/ColorSpace")] = NameObject("/DeviceRGB")
+    image_obj[NameObject("/BitsPerComponent")] = NumberObject(8)
+    image_obj[NameObject("/Filter")] = NameObject("/DCTDecode")
+    ref = writer._add_object(image_obj)
+    if "/Resources" not in page:
+        page[NameObject("/Resources")] = DictionaryObject()
+    resources = page["/Resources"].get_object()
+    if "/XObject" not in resources:
+        resources[NameObject("/XObject")] = DictionaryObject()
+    resources["/XObject"].get_object()[NameObject(name)] = ref
+
+
+def make_pdf_with_corrupt_and_valid_images(path: Path) -> Path:
+    """Cree un PDF de 2 pages : la page 1 contient une image XObject
+    deliberement corrompue (flux DCTDecode illisible), la page 2 une vraie
+    image JPEG valide - pour verifier qu'une image corrompue n'empeche
+    jamais l'extraction des images valides qui la suivent."""
+    import io
+
+    writer = PdfWriter()
+
+    corrupt_page = writer.add_blank_page(width=200, height=200)
+    _add_dct_image_xobject(
+        writer, corrupt_page, "/CorruptImg",
+        b"pas un vrai flux JPEG, juste des octets quelconques 1234567890", 10, 10,
+    )
+
+    valid_page = writer.add_blank_page(width=200, height=200)
+    buffer = io.BytesIO()
+    Image.new("RGB", (10, 10), color=(200, 20, 20)).save(buffer, format="JPEG")
+    _add_dct_image_xobject(writer, valid_page, "/ValidImg", buffer.getvalue(), 10, 10)
+
+    with open(path, "wb") as f:
+        writer.write(f)
+    return path
 
 
 def make_pdf(path: Path, num_pages: int = 1, labels=None) -> Path:
@@ -229,6 +278,36 @@ class PdfOpsTestCase(unittest.TestCase):
 
         extracted = ops.extract_embedded_images(pdf, self.tmp / "out", "doc")
         self.assertIn("doc_p001_img01", extracted[0].name)
+
+    def test_extract_embedded_images_skips_a_corrupt_image_without_aborting_the_rest(self):
+        # Regression trouvee a l'audit : une image corrompue faisait
+        # jusque-la echouer l'extraction de TOUTE l'image en cours
+        # d'iteration (l'exception de decodage se levait pendant l'appel a
+        # page.images lui-meme, avant meme le try:), abandonnant aussi les
+        # images valides des pages suivantes.
+        pdf = make_pdf_with_corrupt_and_valid_images(self.tmp / "doc.pdf")
+        extracted = ops.extract_embedded_images(pdf, self.tmp / "out", "doc")
+        self.assertEqual(len(extracted), 1)
+        self.assertIn("p002", extracted[0].name)  # l'image valide de la page 2 est bien recuperee
+        with Image.open(extracted[0]) as img:
+            self.assertEqual(img.size, (10, 10))
+
+    def test_extract_embedded_images_avoids_overwriting_a_pre_existing_file(self):
+        # Regression trouvee a l'audit : extraire deux fois vers le meme
+        # dossier (ou deux PDF de meme nom depuis des dossiers differents)
+        # produisait le meme nom de fichier de sortie, la seconde
+        # extraction ecrasant silencieusement la premiere.
+        source_image = self.tmp / "photo.png"
+        Image.new("RGB", (10, 10), color=(1, 2, 3)).save(source_image)
+        pdf = make_pdf_with_image(self.tmp / "doc.pdf", source_image)
+
+        first = ops.extract_embedded_images(pdf, self.tmp / "out", "doc")
+        second = ops.extract_embedded_images(pdf, self.tmp / "out", "doc")
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertNotEqual(first[0], second[0])
+        self.assertTrue(first[0].exists())
+        self.assertTrue(second[0].exists())
 
     def test_extract_embedded_images_from_encrypted_pdf_requires_password(self):
         source_image = self.tmp / "photo.png"
