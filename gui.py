@@ -915,6 +915,25 @@ class PdfAtelierApp:
         ttk.Combobox(options, textvariable=self.p2i_format_var, values=["png", "jpg"], width=6, state="readonly").pack(side=LEFT, padx=5)
         ttk.Button(pdf_to_img, text="Convertir en images...", command=self._p2i_run).pack(anchor="w", padx=5, pady=5)
 
+        extract_img = ttk.LabelFrame(frame, text="Extraire les images embarquees")
+        extract_img.pack(fill=X, padx=10, pady=(0, 10))
+        self.eei_source_path = None
+        self.eei_source_var = StringVar(value="Aucun fichier choisi")
+        self.eei_password_var = StringVar()
+
+        eei_top = ttk.Frame(extract_img)
+        eei_top.pack(fill=X, padx=5, pady=5)
+        ttk.Button(eei_top, text="Choisir un PDF...", command=self._eei_pick_source).pack(side=LEFT)
+        ttk.Label(eei_top, textvariable=self.eei_source_var).pack(side=LEFT, padx=10)
+        ttk.Label(eei_top, text="Mot de passe (si protege)").pack(side=LEFT, padx=(15, 0))
+        ttk.Entry(eei_top, textvariable=self.eei_password_var, show="*", width=16).pack(side=LEFT, padx=5)
+        ttk.Label(
+            extract_img,
+            text="Recupere les photos/logos tels qu'embarques dans le PDF, sans rasteriser la page entiere.",
+            foreground="#666",
+        ).pack(anchor="w", padx=5)
+        ttk.Button(extract_img, text="Extraire les images...", command=self._eei_run).pack(anchor="w", padx=5, pady=5)
+
         img_to_pdf = ttk.LabelFrame(frame, text="Images vers PDF")
         img_to_pdf.pack(fill=BOTH, expand=True, padx=10, pady=10)
         self.i2p_files: list = []
@@ -963,6 +982,32 @@ class PdfAtelierApp:
         result = self._run_safely(action)
         if result is not None:
             messagebox.showinfo(APP_TITLE, f"{len(result)} image(s) generee(s) dans {output_dir}")
+
+    def _eei_pick_source(self):
+        path = self._pick_pdf()
+        if not path:
+            return
+        self.eei_source_path = path
+        self.eei_source_var.set(path.name)
+
+    def _eei_run(self):
+        if not self.eei_source_path:
+            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            return
+        output_dir = filedialog.askdirectory(title="Dossier de destination")
+        if not output_dir:
+            return
+        base_name = self.eei_source_path.stem
+        password = self.eei_password_var.get() or None
+
+        result = self._run_safely(
+            lambda: ops.extract_embedded_images(self.eei_source_path, output_dir, base_name, password=password)
+        )
+        if result is not None:
+            if not result:
+                messagebox.showinfo(APP_TITLE, "Aucune image embarquee trouvee dans ce PDF.")
+            else:
+                messagebox.showinfo(APP_TITLE, f"{len(result)} image(s) extraite(s) dans {output_dir}")
 
     def _i2p_add_files(self):
         paths = filedialog.askopenfilenames(title="Choisir des images", filetypes=IMAGE_FILETYPES)

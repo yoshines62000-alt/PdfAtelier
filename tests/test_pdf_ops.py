@@ -206,6 +206,42 @@ class PdfOpsTestCase(unittest.TestCase):
         with self.assertRaises(ops.PdfOpsError):
             ops.images_to_pdf([], self.tmp / "out.pdf")
 
+    def test_extract_embedded_images_recovers_the_embedded_photo(self):
+        source_image = self.tmp / "photo.png"
+        Image.new("RGB", (40, 30), color=(10, 20, 30)).save(source_image)
+        pdf = make_pdf_with_image(self.tmp / "doc.pdf", source_image)
+
+        extracted = ops.extract_embedded_images(pdf, self.tmp / "out", "doc")
+        self.assertEqual(len(extracted), 1)
+        self.assertTrue(extracted[0].exists())
+        with Image.open(extracted[0]) as img:
+            self.assertEqual(img.size, (40, 30))
+
+    def test_extract_embedded_images_on_pdf_without_images_returns_empty_list(self):
+        pdf = make_pdf(self.tmp / "text_only.pdf", num_pages=1)
+        extracted = ops.extract_embedded_images(pdf, self.tmp / "out", "text_only")
+        self.assertEqual(extracted, [])
+
+    def test_extract_embedded_images_names_files_per_page(self):
+        source_image = self.tmp / "photo.png"
+        Image.new("RGB", (10, 10), color=(1, 2, 3)).save(source_image)
+        pdf = make_pdf_with_image(self.tmp / "doc.pdf", source_image)
+
+        extracted = ops.extract_embedded_images(pdf, self.tmp / "out", "doc")
+        self.assertIn("doc_p001_img01", extracted[0].name)
+
+    def test_extract_embedded_images_from_encrypted_pdf_requires_password(self):
+        source_image = self.tmp / "photo.png"
+        Image.new("RGB", (10, 10), color=(1, 2, 3)).save(source_image)
+        pdf = make_pdf_with_image(self.tmp / "doc.pdf", source_image)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+
+        with self.assertRaises(ops.PdfOpsError):
+            ops.extract_embedded_images(protected, self.tmp / "out", "doc")
+        extracted = ops.extract_embedded_images(protected, self.tmp / "out", "doc", password="secret")
+        self.assertEqual(len(extracted), 1)
+
     def test_merge_pdfs_with_one_encrypted_file_using_passwords_list(self):
         pdf_a = make_pdf(self.tmp / "a.pdf", num_pages=1, labels=["A1"])
         pdf_b = make_pdf(self.tmp / "b.pdf", num_pages=1, labels=["B1"])

@@ -319,3 +319,39 @@ def extract_text(input_path: Path, password: Optional[str] = None) -> list:
     """Renvoie une liste de chaines, une par page."""
     reader = _open_reader(input_path, password=password)
     return [page.extract_text() or "" for page in reader.pages]
+
+
+def extract_embedded_images(
+    input_path: Path, output_dir: Path, base_name: str, password: Optional[str] = None
+) -> list:
+    """Extrait les images embarquees telles quelles (logos, photos...), sans
+    jamais rasteriser la page entiere - contrairement a pdf_to_images qui
+    rend chaque page complete en image, ceci recupere directement les objets
+    image du PDF (page.images de pypdf), a leur resolution d'origine.
+    Une image individuelle corrompue/non decodable est ignoree plutot que de
+    faire echouer toute l'extraction - meme philosophie que compress_pdf
+    (voir CompressionResult) : un probleme localise ne doit jamais empecher
+    de recuperer le reste."""
+    reader = _open_reader(input_path, password=password)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_paths = []
+    for page_index, page in enumerate(reader.pages, start=1):
+        for image_index, image_file in enumerate(page.images, start=1):
+            try:
+                image = image_file.image
+                if image is None:
+                    continue
+                ext = Path(image_file.name).suffix.lstrip(".").lower() or "png"
+                if ext in ("jpg", "jpeg"):
+                    ext = "jpg"
+                    save_image = image.convert("RGB") if image.mode not in ("RGB", "L") else image
+                else:
+                    ext = "png"
+                    save_image = image
+                output_path = output_dir / f"{base_name}_p{page_index:03d}_img{image_index:02d}.{ext}"
+                save_image.save(output_path)
+                output_paths.append(output_path)
+            except (OSError, ValueError):
+                continue
+    return output_paths
