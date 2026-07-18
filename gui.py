@@ -350,7 +350,22 @@ class PdfAtelierApp:
         output_dir = filedialog.askdirectory(title="Dossier de destination")
         if not output_dir:
             return None
-        pairs = [(src, Path(output_dir) / f"{src.stem}{batch_suffix}.pdf") for src in sources]
+        # Deux sources peuvent produire le meme nom de fichier de sortie
+        # (meme fichier ajoute deux fois via le glisser-depose, ou deux
+        # fichiers de meme nom venant de dossiers differents) : sans
+        # desambiguisation, la seconde ecraserait silencieusement le
+        # resultat de la premiere tout en etant comptee comme un succes a
+        # part entiere dans le resume (bug trouve a l'audit).
+        pairs = []
+        used_outputs = set()
+        for src in sources:
+            candidate = Path(output_dir) / f"{src.stem}{batch_suffix}.pdf"
+            counter = 1
+            while candidate in used_outputs:
+                candidate = Path(output_dir) / f"{src.stem}{batch_suffix} ({counter}).pdf"
+                counter += 1
+            used_outputs.add(candidate)
+            pairs.append((src, candidate))
         for src, out in pairs:
             if not self._warn_if_output_overwrites_source(sources, out):
                 return None
