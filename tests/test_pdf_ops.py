@@ -267,6 +267,47 @@ class PdfOpsTestCase(unittest.TestCase):
         texts = ops.extract_text(output)
         self.assertIn("Contenu original", texts[0])
 
+    def test_add_page_numbers_preserves_page_count_and_original_text(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=3, labels=["Un", "Deux", "Trois"])
+        output = self.tmp / "numbered.pdf"
+        ops.add_page_numbers(pdf, output)
+
+        self.assertEqual(ops.get_page_count(output), 3)
+        texts = ops.extract_text(output)
+        self.assertIn("Un", texts[0])
+        self.assertIn("1 / 3", texts[0])
+        self.assertIn("2 / 3", texts[1])
+        self.assertIn("3 / 3", texts[2])
+
+    def test_add_page_numbers_respects_start_at(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=2)
+        output = self.tmp / "numbered.pdf"
+        ops.add_page_numbers(pdf, output, start_at=5)
+        texts = ops.extract_text(output)
+        self.assertIn("5 / 2", texts[0])
+        self.assertIn("6 / 2", texts[1])
+
+    def test_add_page_numbers_supports_custom_format(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
+        output = self.tmp / "numbered.pdf"
+        ops.add_page_numbers(pdf, output, fmt="Page {page}")
+        texts = ops.extract_text(output)
+        self.assertIn("Page 1", texts[0])
+
+    def test_add_page_numbers_rejects_invalid_position(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
+        with self.assertRaises(ops.PdfOpsError):
+            ops.add_page_numbers(pdf, self.tmp / "out.pdf", position="milieu")
+
+    def test_add_page_numbers_on_encrypted_pdf_requires_password(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+        with self.assertRaises(ops.PdfOpsError):
+            ops.add_page_numbers(protected, self.tmp / "out.pdf")
+        ops.add_page_numbers(protected, self.tmp / "out.pdf", password="secret")
+        self.assertEqual(ops.get_page_count(self.tmp / "out.pdf"), 1)
+
     def test_set_password_then_remove_password_roundtrip(self):
         pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1, labels=["Secret"])
         protected = self.tmp / "protected.pdf"

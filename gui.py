@@ -64,6 +64,7 @@ class PdfAtelierApp:
         self.compress_tab = ttk.Frame(notebook)
         self.convert_tab = ttk.Frame(notebook)
         self.watermark_tab = ttk.Frame(notebook)
+        self.page_numbers_tab = ttk.Frame(notebook)
         self.protect_tab = ttk.Frame(notebook)
         self.text_tab = ttk.Frame(notebook)
 
@@ -73,6 +74,7 @@ class PdfAtelierApp:
         notebook.add(self.compress_tab, text="Compresser")
         notebook.add(self.convert_tab, text="Convertir")
         notebook.add(self.watermark_tab, text="Filigrane")
+        notebook.add(self.page_numbers_tab, text="Numeroter")
         notebook.add(self.protect_tab, text="Protection")
         notebook.add(self.text_tab, text="Texte")
 
@@ -82,6 +84,7 @@ class PdfAtelierApp:
         self._build_compress_tab()
         self._build_convert_tab()
         self._build_watermark_tab()
+        self._build_page_numbers_tab()
         self._build_protect_tab()
         self._build_text_tab()
 
@@ -1122,6 +1125,106 @@ class PdfAtelierApp:
 
         successes, failures = self._run_batch(pairs, make_action)
         self._show_batch_summary(successes, failures, "traite(s) (filigrane applique)")
+
+    # -- onglet Numeroter ---------------------------------------------------------------
+
+    def _build_page_numbers_tab(self):
+        frame = self.page_numbers_tab
+        self.page_numbers_sources: list = []
+        self.page_numbers_passwords: dict = {}
+        self.page_numbers_position_var = StringVar(value="bas-centre")
+        self.page_numbers_start_var = IntVar(value=1)
+        self.page_numbers_format_var = StringVar(value="{page} / {total}")
+        self.page_numbers_size_var = IntVar(value=10)
+
+        top = ttk.Frame(frame)
+        top.pack(fill=X, padx=10, pady=10)
+        self.page_numbers_listbox = ttk_listbox(top, height=5)
+        self.page_numbers_listbox.pack(side=LEFT, fill=X, expand=True)
+        self._register_pdf_drop(
+            self.page_numbers_listbox, self.page_numbers_sources,
+            lambda: self._reload_listbox(self.page_numbers_listbox, self.page_numbers_sources),
+            self.page_numbers_passwords,
+        )
+        buttons = ttk.Frame(top)
+        buttons.pack(side=LEFT, padx=(10, 0))
+        ttk.Button(buttons, text="Ajouter...", command=self._page_numbers_add_files).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Retirer", command=self._page_numbers_remove_selected).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Vider", command=self._page_numbers_clear).pack(fill=X, pady=2)
+
+        row1 = ttk.Frame(frame)
+        row1.pack(anchor="w", padx=10, pady=(10, 0))
+        ttk.Label(row1, text="Position").pack(side=LEFT)
+        ttk.Combobox(
+            row1, textvariable=self.page_numbers_position_var, state="readonly", width=14,
+            values=["bas-centre", "bas-droite", "bas-gauche", "haut-centre", "haut-droite", "haut-gauche"],
+        ).pack(side=LEFT, padx=5)
+        ttk.Label(row1, text="Commencer a").pack(side=LEFT, padx=(15, 0))
+        ttk.Entry(row1, textvariable=self.page_numbers_start_var, width=6).pack(side=LEFT, padx=5)
+        ttk.Label(row1, text="Taille de police").pack(side=LEFT, padx=(15, 0))
+        ttk.Entry(row1, textvariable=self.page_numbers_size_var, width=6).pack(side=LEFT, padx=5)
+
+        row2 = ttk.Frame(frame)
+        row2.pack(anchor="w", padx=10, pady=(10, 0))
+        ttk.Label(row2, text="Format ({page} et {total} disponibles)").pack(side=LEFT)
+        ttk.Entry(row2, textvariable=self.page_numbers_format_var, width=20).pack(side=LEFT, padx=5)
+
+        ttk.Button(frame, text="Numeroter les pages...", command=self._page_numbers_run).pack(anchor="w", padx=10, pady=15)
+
+    def _page_numbers_add_files(self):
+        self._add_pdfs_with_password_prompt(self.page_numbers_sources, self.page_numbers_passwords)
+        self._reload_listbox(self.page_numbers_listbox, self.page_numbers_sources)
+
+    def _page_numbers_remove_selected(self):
+        selection = self.page_numbers_listbox.curselection()
+        if not selection:
+            return
+        del self.page_numbers_sources[selection[0]]
+        self._reload_listbox(self.page_numbers_listbox, self.page_numbers_sources)
+
+    def _page_numbers_clear(self):
+        self.page_numbers_sources.clear()
+        self.page_numbers_passwords.clear()
+        self._reload_listbox(self.page_numbers_listbox, self.page_numbers_sources)
+
+    def _page_numbers_run(self):
+        if not self.page_numbers_sources:
+            messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
+            return
+        fmt = self.page_numbers_format_var.get().strip()
+        if not fmt:
+            messagebox.showwarning(APP_TITLE, "Le format ne peut pas etre vide.")
+            return
+        try:
+            fmt.format(page=1, total=1)
+        except (KeyError, ValueError, IndexError) as exc:
+            messagebox.showwarning(APP_TITLE, f"Format invalide : {exc}")
+            return
+        pairs = self._resolve_batch_outputs(self.page_numbers_sources, "numerote.pdf", "_numerote")
+        if pairs is None:
+            return
+
+        try:
+            start_at = self.page_numbers_start_var.get()
+            font_size = self.page_numbers_size_var.get()
+        except Exception as exc:
+            messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+            return
+        position = self.page_numbers_position_var.get()
+
+        def make_action(source, output):
+            return ops.add_page_numbers(
+                source, output, position=position, start_at=start_at, font_size=font_size, fmt=fmt,
+                password=self.page_numbers_passwords.get(self._resolve(source)),
+            )
+
+        if len(pairs) == 1:
+            source, output = pairs[0]
+            self._run_safely(lambda: make_action(source, output), f"Pages numerotees : {output.name}")
+            return
+
+        successes, failures = self._run_batch(pairs, make_action)
+        self._show_batch_summary(successes, failures, "traite(s) (pages numerotees)")
 
     # -- onglet Protection ------------------------------------------------------------
 

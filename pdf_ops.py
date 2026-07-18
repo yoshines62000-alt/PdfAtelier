@@ -286,6 +286,63 @@ def add_text_watermark(
     _write_output(writer, output_path)
 
 
+_PAGE_NUMBER_POSITIONS = ("bas-centre", "bas-droite", "bas-gauche", "haut-centre", "haut-droite", "haut-gauche")
+
+
+def add_page_numbers(
+    input_path: Path, output_path: Path, position: str = "bas-centre",
+    start_at: int = 1, font_size: int = 10, fmt: str = "{page} / {total}",
+    password: Optional[str] = None,
+) -> None:
+    """Superpose un numero de page sur chaque page, selon le meme principe de
+    calque que add_text_watermark (un mini-PDF genere par reportlab, fusionne
+    par-dessus la page existante via merge_page). `start_at` permet de
+    demarrer la numerotation a une valeur autre que 1 (ex : un document dont
+    la page 1 est une couverture non numerotee, mais que l'on souhaite quand
+    meme voir "2 / 12" sur la deuxieme page)."""
+    import io
+
+    from reportlab.pdfgen import canvas
+
+    if position not in _PAGE_NUMBER_POSITIONS:
+        raise PdfOpsError(f"Position de numerotation invalide : {position}")
+    fmt = _latin1_safe(fmt)
+    reader = _open_reader(input_path, password=password)
+    writer = PdfWriter()
+    writer.append(reader)
+    total = len(writer.pages)
+    margin = 20
+
+    for index, page in enumerate(writer.pages):
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        label = fmt.format(page=start_at + index, total=total)
+
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=(width, height))
+        c.setFont("Helvetica", font_size)
+        if "centre" in position:
+            x, align = width / 2, "center"
+        elif "droite" in position:
+            x, align = width - margin, "right"
+        else:
+            x, align = margin, "left"
+        y = height - margin if position.startswith("haut") else margin
+
+        if align == "center":
+            c.drawCentredString(x, y, label)
+        elif align == "right":
+            c.drawRightString(x, y, label)
+        else:
+            c.drawString(x, y, label)
+        c.save()
+        buffer.seek(0)
+
+        overlay_reader = PdfReader(buffer)
+        page.merge_page(overlay_reader.pages[0])
+    _write_output(writer, output_path)
+
+
 # -- protection par mot de passe --------------------------------------------------
 
 def set_password(
