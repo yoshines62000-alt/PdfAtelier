@@ -1197,7 +1197,7 @@ class PdfAtelierApp:
             return
         try:
             fmt.format(page=1, total=1)
-        except (KeyError, ValueError, IndexError) as exc:
+        except (KeyError, ValueError, IndexError, TypeError, AttributeError) as exc:
             messagebox.showwarning(APP_TITLE, f"Format invalide : {exc}")
             return
         pairs = self._resolve_batch_outputs(self.page_numbers_sources, "numerote.pdf", "_numerote")
