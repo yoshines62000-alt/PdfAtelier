@@ -175,6 +175,23 @@ class PdfAtelierApp:
         return True
 
     @staticmethod
+    def _render_pdf_page_image(path, password, page_number: int, rotation: int = 0, scale: float = 0.6):
+        """Rendu d'une page en image PIL, reutilise par l'apercu de l'onglet
+        Pages et par l'apercu avant fusion."""
+        import pypdfium2 as pdfium
+
+        pdf = pdfium.PdfDocument(str(path), password=password)
+        try:
+            page = pdf[page_number - 1]
+            bitmap = page.render(scale=scale)
+            image = bitmap.to_pil().rotate(-rotation, expand=True)
+            bitmap.close()
+            page.close()
+            return image
+        finally:
+            pdf.close()
+
+    @staticmethod
     def _move_listbox_selection(listbox, items: list, delta: int):
         selection = listbox.curselection()
         if not selection:
@@ -377,10 +394,15 @@ class PdfAtelierApp:
         body.pack(fill=BOTH, expand=True, padx=10, pady=5)
         self.merge_listbox = ttk_listbox(body)
         self.merge_listbox.pack(side=LEFT, fill=BOTH, expand=True)
+        self.merge_listbox.bind("<<ListboxSelect>>", self._merge_on_select)
         self._register_pdf_drop(
             self.merge_listbox, self.merge_files,
             lambda: self._reload_listbox(self.merge_listbox, self.merge_files), prompt_password=False,
         )
+
+        self.merge_preview_label = ttk.Label(body, text="(apercu)")
+        self.merge_preview_label.pack(side=LEFT, padx=10, fill=Y)
+        self._merge_preview_image = None  # garde une reference, sinon Tkinter la libere
 
         buttons = ttk.Frame(body)
         buttons.pack(side=LEFT, fill=Y, padx=(10, 0))
@@ -399,6 +421,7 @@ class PdfAtelierApp:
 
     def _merge_move(self, delta):
         self._move_listbox_selection(self.merge_listbox, self.merge_files, delta)
+        self._merge_on_select()
 
     def _merge_remove_selected(self):
         selection = self.merge_listbox.curselection()
@@ -406,10 +429,28 @@ class PdfAtelierApp:
             return
         del self.merge_files[selection[0]]
         self._reload_listbox(self.merge_listbox, self.merge_files)
+        self.merge_preview_label.configure(text="(apercu)", image="")
 
     def _merge_clear(self):
         self.merge_files.clear()
         self._reload_listbox(self.merge_listbox, self.merge_files)
+        self.merge_preview_label.configure(text="(apercu)", image="")
+
+    def _merge_on_select(self, event=None):
+        selection = self.merge_listbox.curselection()
+        if not selection or selection[0] >= len(self.merge_files):
+            return
+        path = self.merge_files[selection[0]]
+        try:
+            image = self._render_pdf_page_image(path, None, 1)
+            from PIL import ImageTk
+
+            image.thumbnail((220, 300))
+            photo = ImageTk.PhotoImage(image)
+            self._merge_preview_image = photo
+            self.merge_preview_label.configure(image=photo, text="")
+        except Exception:
+            self.merge_preview_label.configure(text="(apercu indisponible)", image="")
 
     def _merge_run(self):
         if len(self.merge_files) < 2:
@@ -563,17 +604,9 @@ class PdfAtelierApp:
             return
         entry = self.page_state[selection[0]]
         try:
-            import pypdfium2 as pdfium
-
-            pdf = pdfium.PdfDocument(str(self.pages_source_path), password=self.pages_source_password)
-            try:
-                page = pdf[entry["page"] - 1]
-                bitmap = page.render(scale=0.6)
-                image = bitmap.to_pil().rotate(-entry["rotation"], expand=True)
-                bitmap.close()
-                page.close()
-            finally:
-                pdf.close()
+            image = self._render_pdf_page_image(
+                self.pages_source_path, self.pages_source_password, entry["page"], entry["rotation"],
+            )
             from PIL import ImageTk
 
             image.thumbnail((260, 340))
