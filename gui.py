@@ -16,6 +16,7 @@ from tkinter import (
 import pdf_ops as ops
 
 APP_TITLE = "PdfAtelier"
+DONATE_URL = "https://ko-fi.com/yoshines62000"
 PDF_FILETYPES = [("Fichiers PDF", "*.pdf")]
 IMAGE_FILETYPES = [("Images", "*.png *.jpg *.jpeg *.bmp *.tiff")]
 
@@ -46,6 +47,12 @@ class PdfAtelierApp:
                 self.root.iconbitmap(str(icon_path))
             except Exception:
                 pass
+
+        bottom_bar = ttk.Frame(self.root)
+        bottom_bar.pack(fill=X, side="bottom")
+        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
+        donate_label.pack(side=RIGHT, padx=8, pady=4)
+        donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=BOTH, expand=True, padx=8, pady=8)
