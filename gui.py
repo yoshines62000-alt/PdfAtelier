@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 from tkinter import (
     BOTH, END, HORIZONTAL, LEFT, RIGHT, TOP, X, Y, VERTICAL,
-    BooleanVar, Canvas, IntVar, StringVar, Tk, ttk, messagebox, filedialog,
+    BooleanVar, Canvas, IntVar, StringVar, Tk, Toplevel, ttk, messagebox, filedialog,
 )
 
 import pdf_ops as ops
@@ -480,7 +480,10 @@ class PdfAtelierApp:
         ttk.Label(top, textvariable=self.split_source_var).pack(side=LEFT, padx=10)
 
         ttk.Radiobutton(frame, text="Par plages de pages (ex : 1-3,5,7-9)", variable=self.split_mode_var, value="ranges").pack(anchor="w", padx=10, pady=(10, 0))
-        ttk.Entry(frame, textvariable=self.split_ranges_var, width=40).pack(anchor="w", padx=30)
+        ranges_row = ttk.Frame(frame)
+        ranges_row.pack(anchor="w", padx=30, fill=X)
+        ttk.Entry(ranges_row, textvariable=self.split_ranges_var, width=40).pack(side=LEFT)
+        ttk.Button(ranges_row, text="Choisir les pages visuellement...", command=self._split_open_visual_picker).pack(side=LEFT, padx=(10, 0))
 
         ttk.Radiobutton(frame, text="Toutes les N pages :", variable=self.split_mode_var, value="every_n").pack(anchor="w", padx=10, pady=(10, 0))
         ttk.Entry(frame, textvariable=self.split_every_n_var, width=6).pack(anchor="w", padx=30)
@@ -514,6 +517,82 @@ class PdfAtelierApp:
         if not ranges:
             raise ops.PdfOpsError("Indiquez au moins une plage de pages (ex : 1-3,5).")
         return ranges
+
+    @staticmethod
+    def _pages_to_range_string(pages) -> str:
+        """Compresse une liste de numeros de page (1-indexes, pas forcement
+        triee ni sans doublons) vers le format texte attendu par
+        `_parse_ranges` (ex : [1, 2, 3, 5, 7, 8] -> "1-3,5,7-8")."""
+        ordered = sorted(set(pages))
+        if not ordered:
+            return ""
+        chunks = []
+        start = previous = ordered[0]
+        for page in ordered[1:]:
+            if page == previous + 1:
+                previous = page
+                continue
+            chunks.append(f"{start}-{previous}" if start != previous else str(start))
+            start = previous = page
+        chunks.append(f"{start}-{previous}" if start != previous else str(start))
+        return ",".join(chunks)
+
+    def _split_open_visual_picker(self):
+        if not self.split_source_path:
+            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            return
+        try:
+            page_count = ops.get_page_count(self.split_source_path, password=self.split_source_password)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Impossible de lire ce PDF : {exc}")
+            return
+
+        dialog = Toplevel(self.root)
+        dialog.title("Choisir les pages")
+        dialog.transient(self.root)
+
+        body = ttk.Frame(dialog)
+        body.pack(fill=BOTH, expand=True, padx=10, pady=10)
+
+        listbox = ttk_listbox(body, height=16, selectmode="extended")
+        for page in range(1, page_count + 1):
+            listbox.insert(END, f"Page {page}")
+        listbox.pack(side=LEFT, fill=BOTH, expand=True)
+
+        preview_label = ttk.Label(body, text="(apercu)")
+        preview_label.pack(side=LEFT, padx=10, fill=Y)
+        preview_holder = {"image": None}
+
+        def on_select(event=None):
+            active = listbox.index("active")
+            if active is None or not (0 <= active < page_count):
+                return
+            try:
+                image = self._render_pdf_page_image(self.split_source_path, self.split_source_password, active + 1)
+                from PIL import ImageTk
+
+                image.thumbnail((220, 300))
+                photo = ImageTk.PhotoImage(image)
+                preview_holder["image"] = photo
+                preview_label.configure(image=photo, text="")
+            except Exception:
+                preview_label.configure(text="(apercu indisponible)", image="")
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+
+        def validate():
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showwarning(APP_TITLE, "Selectionnez au moins une page.", parent=dialog)
+                return
+            self.split_ranges_var.set(self._pages_to_range_string(index + 1 for index in selection))
+            self.split_mode_var.set("ranges")
+            dialog.destroy()
+
+        actions = ttk.Frame(dialog)
+        actions.pack(fill=X, padx=10, pady=(0, 10))
+        ttk.Button(actions, text="Valider la selection", command=validate).pack(side=LEFT)
+        ttk.Button(actions, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=(10, 0))
 
     def _split_run(self):
         if not self.split_source_path:
@@ -1128,10 +1207,10 @@ class PdfAtelierApp:
         messagebox.showinfo(APP_TITLE, f"Texte enregistre : {Path(output).name}")
 
 
-def ttk_listbox(parent, height=12):
+def ttk_listbox(parent, height=12, selectmode="browse"):
     from tkinter import Listbox
 
-    listbox = Listbox(parent, height=height, exportselection=False)
+    listbox = Listbox(parent, height=height, exportselection=False, selectmode=selectmode)
     return listbox
 
 
