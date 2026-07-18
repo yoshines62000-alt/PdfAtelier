@@ -721,6 +721,11 @@ class PdfAtelierApp:
         self.page_state[index], self.page_state[new_index] = self.page_state[new_index], self.page_state[index]
         self._pages_reload_listbox()
         self.pages_listbox.selection_set(new_index)
+        # selection_set() ne declenche pas <<ListboxSelect>> : sans cet appel
+        # explicite, l'apercu resterait celui de la derniere ligne reellement
+        # cliquee jusqu'au prochain clic (bug trouve a l'audit, deja evite
+        # dans _pages_rotate/_pages_delete/_merge_move).
+        self._pages_on_select()
 
     def _pages_rotate(self):
         selection = self.pages_listbox.curselection()
@@ -1182,6 +1187,7 @@ class PdfAtelierApp:
         self.text_search_status_var = StringVar(value="")
         self._text_search_matches: list = []
         self._text_search_index = -1
+        self._text_search_query_length = 0
 
         search_row = ttk.Frame(frame)
         search_row.pack(fill=X, padx=10, pady=(0, 5))
@@ -1237,6 +1243,12 @@ class PdfAtelierApp:
         if not query:
             self.text_search_status_var.set("")
             return
+        # Fige la longueur de la requete au moment de la recherche : si
+        # l'utilisateur retape autre chose dans le champ SANS relancer la
+        # recherche (ex: avant de cliquer Suivant/Precedent), le surlignage
+        # ne doit pas se mettre a utiliser cette nouvelle longueur pour des
+        # positions trouvees avec l'ancienne requete (bug trouve a l'audit).
+        self._text_search_query_length = len(query)
         start = "1.0"
         while True:
             pos = self.text_output.search(query, start, stopindex=END, nocase=True)
@@ -1257,7 +1269,7 @@ class PdfAtelierApp:
         if not (0 <= self._text_search_index < len(self._text_search_matches)):
             return
         pos = self._text_search_matches[self._text_search_index]
-        end = f"{pos}+{len(self.text_search_var.get())}c"
+        end = f"{pos}+{self._text_search_query_length}c"
         self.text_output.tag_add("search_current", pos, end)
         self.text_output.see(pos)
         self.text_search_status_var.set(f"{self._text_search_index + 1}/{len(self._text_search_matches)}")
