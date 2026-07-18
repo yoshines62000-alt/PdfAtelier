@@ -97,7 +97,11 @@ class PdfAtelierApp:
     def _run_safely(self, action, success_message=None):
         """Execute une operation pdf_ops en capturant PdfOpsError (erreur
         metier, message deja clair pour l'utilisateur) separement de toute
-        autre exception inattendue (bug, fichier verrouille, disque plein...)."""
+        autre exception inattendue (bug, fichier verrouille, disque plein...).
+        Toute lecture de champ (IntVar.get(), etc.) doit se faire A
+        L'INTERIEUR de `action`, pas avant l'appel : un champ numerique
+        contenant du texte non valide leve TclError, qui doit elle aussi
+        etre capturee ici plutot que de faire planter le callback."""
         try:
             result = action()
         except ops.PdfOpsError as exc:
@@ -109,6 +113,58 @@ class PdfAtelierApp:
         if success_message:
             messagebox.showinfo(APP_TITLE, success_message)
         return result
+
+    def _prompt_for_password(self, filename: str):
+        from tkinter import simpledialog
+
+        return simpledialog.askstring(
+            APP_TITLE, f"'{filename}' est protege par un mot de passe.\nMot de passe :", show="*", parent=self.root,
+        )
+
+    def _load_page_count_with_password_prompt(self, path: Path):
+        """Tente de lire le nombre de pages ; si le fichier est protege,
+        demande le mot de passe (une seule relance). Renvoie (nombre_de_pages,
+        mot_de_passe_utilise) ou (None, None) si annule/echoue - dans ce cas
+        un message a deja ete affiche a l'utilisateur."""
+        try:
+            return ops.get_page_count(path), None
+        except ops.PdfOpsError:
+            pass
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Impossible de lire ce PDF : {exc}")
+            return None, None
+
+        password = self._prompt_for_password(path.name)
+        if not password:
+            return None, None
+        try:
+            return ops.get_page_count(path, password=password), password
+        except ops.PdfOpsError as exc:
+            messagebox.showwarning(APP_TITLE, str(exc))
+            return None, None
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Impossible de lire ce PDF : {exc}")
+            return None, None
+
+    @staticmethod
+    def _resolve(path) -> Path:
+        return Path(path).expanduser().resolve()
+
+    def _warn_if_output_overwrites_source(self, sources, output: Path) -> bool:
+        """Renvoie True si l'operation peut se poursuivre. Ecrire le resultat
+        par-dessus l'un des fichiers source est desormais techniquement sans
+        risque (ecriture atomique), mais reste presque toujours une erreur de
+        frappe de l'utilisateur (perte du fichier original) : on demande
+        confirmation plutot que de laisser faire silencieusement."""
+        output_resolved = self._resolve(output)
+        source_list = sources if isinstance(sources, (list, tuple)) else [sources]
+        if any(self._resolve(s) == output_resolved for s in source_list if s):
+            return messagebox.askyesno(
+                APP_TITLE,
+                "Le fichier de destination choisi est le meme que le fichier source.\n"
+                "Le fichier d'origine sera remplace par le resultat. Continuer ?",
+            )
+        return True
 
     @staticmethod
     def _move_listbox_selection(listbox, items: list, delta: int):
@@ -178,6 +234,8 @@ class PdfAtelierApp:
         output = self._save_pdf_as("fusion.pdf")
         if not output:
             return
+        if not self._warn_if_output_overwrites_source(self.merge_files, output):
+            return
         self._run_safely(lambda: ops.merge_pdfs(self.merge_files, output), f"PDF fusionne enregistre : {output.name}")
 
     # -- onglet Diviser ---------------------------------------------------------
@@ -186,6 +244,7 @@ class PdfAtelierApp:
         frame = self.split_tab
         self.split_source_var = StringVar(value="Aucun fichier choisi")
         self.split_source_path = None
+        self.split_source_password = None
         self.split_mode_var = StringVar(value="ranges")
         self.split_ranges_var = StringVar()
         self.split_every_n_var = StringVar(value="1")
@@ -207,13 +266,13 @@ class PdfAtelierApp:
         path = self._pick_pdf()
         if not path:
             return
-        self.split_source_path = path
-        try:
-            count = ops.get_page_count(path)
-            self.split_source_var.set(f"{path.name} ({count} pages)")
-        except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible de lire ce PDF : {exc}")
+        count, password = self._load_page_count_with_password_prompt(path)
+        if count is None:
             self.split_source_path = None
+            return
+        self.split_source_path = path
+        self.split_source_password = password
+        self.split_source_var.set(f"{path.name} ({count} pages)")
 
     def _parse_ranges(self, text: str, page_count: int):
         ranges = []
@@ -241,19 +300,20 @@ class PdfAtelierApp:
         base_name = self.split_source_path.stem
 
         def action():
+            password = self.split_source_password
             if self.split_mode_var.get() == "ranges":
-                page_count = ops.get_page_count(self.split_source_path)
+                page_count = ops.get_page_count(self.split_source_path, password=password)
                 try:
                     ranges = self._parse_ranges(self.split_ranges_var.get(), page_count)
                 except ValueError:
                     raise ops.PdfOpsError("Format de plages invalide. Exemple attendu : 1-3,5,7-9")
-                return ops.split_pdf_by_ranges(self.split_source_path, ranges, output_dir, base_name)
+                return ops.split_pdf_by_ranges(self.split_source_path, ranges, output_dir, base_name, password=password)
             else:
                 try:
                     n = int(self.split_every_n_var.get())
                 except ValueError:
                     raise ops.PdfOpsError("Le nombre de pages par fichier doit etre un entier.")
-                return ops.split_pdf_every_n_pages(self.split_source_path, n, output_dir, base_name)
+                return ops.split_pdf_every_n_pages(self.split_source_path, n, output_dir, base_name, password=password)
 
         result = self._run_safely(action)
         if result is not None:
@@ -264,6 +324,7 @@ class PdfAtelierApp:
     def _build_pages_tab(self):
         frame = self.pages_tab
         self.pages_source_path = None
+        self.pages_source_password = None
         self.page_state: list = []  # [{"page": int, "rotation": int}]
 
         top = ttk.Frame(frame)
@@ -297,12 +358,11 @@ class PdfAtelierApp:
         path = self._pick_pdf()
         if not path:
             return
-        try:
-            count = ops.get_page_count(path)
-        except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible de lire ce PDF : {exc}")
+        count, password = self._load_page_count_with_password_prompt(path)
+        if count is None:
             return
         self.pages_source_path = path
+        self.pages_source_password = password
         self.pages_source_var.set(f"{path.name} ({count} pages)")
         self.page_state = [{"page": i, "rotation": 0} for i in range(1, count + 1)]
         self._pages_reload_listbox()
@@ -321,11 +381,13 @@ class PdfAtelierApp:
         try:
             import pypdfium2 as pdfium
 
-            pdf = pdfium.PdfDocument(str(self.pages_source_path))
+            pdf = pdfium.PdfDocument(str(self.pages_source_path), password=self.pages_source_password)
             try:
                 page = pdf[entry["page"] - 1]
                 bitmap = page.render(scale=0.6)
                 image = bitmap.to_pil().rotate(-entry["rotation"], expand=True)
+                bitmap.close()
+                page.close()
             finally:
                 pdf.close()
             from PIL import ImageTk
@@ -363,13 +425,26 @@ class PdfAtelierApp:
         selection = self.pages_listbox.curselection()
         if not selection:
             return
-        del self.page_state[selection[0]]
+        index = selection[0]
+        del self.page_state[index]
         self._pages_reload_listbox()
+        if self.page_state:
+            # Sans reselection, la miniature affichee resterait celle de la
+            # page supprimee jusqu'au prochain clic - on pointe donc sur
+            # l'element qui occupe maintenant cet index (ou le precedent, en
+            # fin de liste).
+            new_index = min(index, len(self.page_state) - 1)
+            self.pages_listbox.selection_set(new_index)
+            self._pages_on_select()
+        else:
+            self.pages_preview_label.configure(text="(apercu)", image="")
 
     def _pages_reset(self):
         if not self.pages_source_path:
             return
-        count = ops.get_page_count(self.pages_source_path)
+        count, _ = self._load_page_count_with_password_prompt(self.pages_source_path)
+        if count is None:
+            return
         self.page_state = [{"page": i, "rotation": 0} for i in range(1, count + 1)]
         self._pages_reload_listbox()
 
@@ -383,10 +458,14 @@ class PdfAtelierApp:
         output = self._save_pdf_as("pages_modifiees.pdf")
         if not output:
             return
+        if not self._warn_if_output_overwrites_source(self.pages_source_path, output):
+            return
         page_order = [entry["page"] for entry in self.page_state]
         rotations = {entry["page"]: entry["rotation"] for entry in self.page_state if entry["rotation"]}
         self._run_safely(
-            lambda: ops.reorder_and_filter_pages(self.pages_source_path, output, page_order, rotations),
+            lambda: ops.reorder_and_filter_pages(
+                self.pages_source_path, output, page_order, rotations, password=self.pages_source_password
+            ),
             f"Document enregistre : {output.name}",
         )
 
@@ -395,6 +474,7 @@ class PdfAtelierApp:
     def _build_compress_tab(self):
         frame = self.compress_tab
         self.compress_source_path = None
+        self.compress_source_password = None
         self.compress_source_var = StringVar(value="Aucun fichier choisi")
         self.compress_quality_var = IntVar(value=60)
         self.compress_max_dim_var = IntVar(value=1600)
@@ -418,7 +498,11 @@ class PdfAtelierApp:
         path = self._pick_pdf()
         if not path:
             return
+        count, password = self._load_page_count_with_password_prompt(path)
+        if count is None:
+            return
         self.compress_source_path = path
+        self.compress_source_password = password
         self.compress_source_var.set(path.name)
         self.compress_result_var.set("")
 
@@ -429,11 +513,22 @@ class PdfAtelierApp:
         output = self._save_pdf_as("compresse.pdf")
         if not output:
             return
-        quality = self.compress_quality_var.get()
-        max_dim = self.compress_max_dim_var.get()
-        result = self._run_safely(
-            lambda: ops.compress_pdf(self.compress_source_path, output, image_quality=quality, max_dimension=max_dim)
-        )
+        if not self._warn_if_output_overwrites_source(self.compress_source_path, output):
+            return
+
+        def action():
+            # Lues ici (dans action(), execute par _run_safely) et non avant :
+            # un champ non numerique leverait TclError, qui doit etre
+            # capturee par _run_safely plutot que de faire planter le
+            # callback silencieusement.
+            quality = self.compress_quality_var.get()
+            max_dim = self.compress_max_dim_var.get()
+            return ops.compress_pdf(
+                self.compress_source_path, output, image_quality=quality,
+                max_dimension=max_dim, password=self.compress_source_password,
+            )
+
+        result = self._run_safely(action)
         if result is not None:
             self.compress_result_var.set(
                 f"{_format_size(result.original_size)} -> {_format_size(result.compressed_size)} "
@@ -498,12 +593,17 @@ class PdfAtelierApp:
         output_dir = filedialog.askdirectory(title="Dossier de destination")
         if not output_dir:
             return
-        dpi = self.p2i_dpi_var.get()
-        fmt = self.p2i_format_var.get()
         base_name = self.p2i_source_path.stem
-        result = self._run_safely(
-            lambda: ops.pdf_to_images(self.p2i_source_path, output_dir, base_name, dpi=dpi, fmt=fmt)
-        )
+
+        def action():
+            # Lus ici, pas avant : un DPI non numerique leverait TclError,
+            # capturee par _run_safely plutot que de faire planter le
+            # callback silencieusement.
+            dpi = self.p2i_dpi_var.get()
+            fmt = self.p2i_format_var.get()
+            return ops.pdf_to_images(self.p2i_source_path, output_dir, base_name, dpi=dpi, fmt=fmt)
+
+        result = self._run_safely(action)
         if result is not None:
             messagebox.showinfo(APP_TITLE, f"{len(result)} image(s) generee(s) dans {output_dir}")
 
@@ -536,6 +636,7 @@ class PdfAtelierApp:
     def _build_watermark_tab(self):
         frame = self.watermark_tab
         self.watermark_source_path = None
+        self.watermark_source_password = None
         self.watermark_source_var = StringVar(value="Aucun fichier choisi")
         self.watermark_text_var = StringVar(value="CONFIDENTIEL")
         self.watermark_opacity_var = IntVar(value=30)
@@ -566,7 +667,11 @@ class PdfAtelierApp:
         path = self._pick_pdf()
         if not path:
             return
+        count, password = self._load_page_count_with_password_prompt(path)
+        if count is None:
+            return
         self.watermark_source_path = path
+        self.watermark_source_password = password
         self.watermark_source_var.set(path.name)
 
     def _watermark_run(self):
@@ -580,14 +685,18 @@ class PdfAtelierApp:
         output = self._save_pdf_as("filigrane.pdf")
         if not output:
             return
-        opacity = self.watermark_opacity_var.get() / 100.0
-        self._run_safely(
-            lambda: ops.add_text_watermark(
+        if not self._warn_if_output_overwrites_source(self.watermark_source_path, output):
+            return
+
+        def action():
+            opacity = self.watermark_opacity_var.get() / 100.0
+            return ops.add_text_watermark(
                 self.watermark_source_path, output, text,
                 opacity=opacity, font_size=self.watermark_size_var.get(), angle=self.watermark_angle_var.get(),
-            ),
-            f"Filigrane applique : {output.name}",
-        )
+                password=self.watermark_source_password,
+            )
+
+        self._run_safely(action, f"Filigrane applique : {output.name}")
 
     # -- onglet Protection ------------------------------------------------------------
 
@@ -638,6 +747,8 @@ class PdfAtelierApp:
             output = self._save_pdf_as("protege.pdf")
             if not output:
                 return
+            if not self._warn_if_output_overwrites_source(self.protect_source_path, output):
+                return
             self._run_safely(
                 lambda: ops.set_password(self.protect_source_path, output, password),
                 f"PDF protege enregistre : {output.name}",
@@ -645,6 +756,8 @@ class PdfAtelierApp:
         else:
             output = self._save_pdf_as("sans_mot_de_passe.pdf")
             if not output:
+                return
+            if not self._warn_if_output_overwrites_source(self.protect_source_path, output):
                 return
             self._run_safely(
                 lambda: ops.remove_password(self.protect_source_path, output, password),

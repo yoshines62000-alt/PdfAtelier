@@ -45,6 +45,27 @@ class PdfOpsTestCase(unittest.TestCase):
         pdf = make_pdf(self.tmp / "a.pdf", num_pages=3)
         self.assertEqual(ops.get_page_count(pdf), 3)
 
+    def test_get_page_count_on_encrypted_pdf_requires_password(self):
+        pdf = make_pdf(self.tmp / "a.pdf", num_pages=2)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+        with self.assertRaises(ops.PdfOpsError):
+            ops.get_page_count(protected)
+        self.assertEqual(ops.get_page_count(protected, password="secret"), 2)
+
+    def test_saving_output_over_the_source_file_does_not_corrupt_it(self):
+        # Scenario reel : l'utilisateur choisit d'ecraser le fichier
+        # source lui-meme (ex : "pivoter et enregistrer sous le meme nom").
+        # L'ecriture doit passer par un fichier temporaire puis un
+        # remplacement atomique, sinon la source est tronquee avant que
+        # l'ecriture ne soit terminee.
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=2, labels=["Un", "Deux"])
+        ops.reorder_and_filter_pages(pdf, pdf, page_order=[2, 1])
+        self.assertEqual(ops.get_page_count(pdf), 2)
+        texts = ops.extract_text(pdf)
+        self.assertIn("Deux", texts[0])
+        self.assertIn("Un", texts[1])
+
     def test_merge_pdfs_preserves_page_order_and_content(self):
         pdf_a = make_pdf(self.tmp / "a.pdf", num_pages=1, labels=["A1"])
         pdf_b = make_pdf(self.tmp / "b.pdf", num_pages=2, labels=["B1", "B2"])
@@ -105,6 +126,15 @@ class PdfOpsTestCase(unittest.TestCase):
         with self.assertRaises(ops.PdfOpsError):
             ops.reorder_and_filter_pages(pdf, self.tmp / "out.pdf", page_order=[7])
 
+    def test_reorder_and_filter_pages_on_encrypted_pdf_with_password(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=2, labels=["Un", "Deux"])
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+        output = self.tmp / "out.pdf"
+        ops.reorder_and_filter_pages(protected, output, page_order=[2], password="secret")
+        self.assertEqual(ops.get_page_count(output), 1)
+        self.assertIn("Deux", ops.extract_text(output)[0])
+
     def test_compress_pdf_reduces_size_with_embedded_image(self):
         # Une image bruitee (haute entropie, comme une vraie photo) plutot
         # qu'une couleur unie : une couleur unie se compresse deja quasi
@@ -147,6 +177,22 @@ class PdfOpsTestCase(unittest.TestCase):
     def test_images_to_pdf_rejects_empty_list(self):
         with self.assertRaises(ops.PdfOpsError):
             ops.images_to_pdf([], self.tmp / "out.pdf")
+
+    def test_merge_pdfs_with_one_encrypted_file_using_passwords_list(self):
+        pdf_a = make_pdf(self.tmp / "a.pdf", num_pages=1, labels=["A1"])
+        pdf_b = make_pdf(self.tmp / "b.pdf", num_pages=1, labels=["B1"])
+        protected_b = self.tmp / "b_protected.pdf"
+        ops.set_password(pdf_b, protected_b, user_password="secret")
+
+        output = self.tmp / "merged.pdf"
+        ops.merge_pdfs([pdf_a, protected_b], output, passwords=[None, "secret"])
+        self.assertEqual(ops.get_page_count(output), 2)
+
+    def test_add_text_watermark_with_non_latin1_characters_does_not_crash(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
+        output = self.tmp / "watermarked.pdf"
+        ops.add_text_watermark(pdf, output, text="Confidentiel — “interne” ✨")
+        self.assertEqual(ops.get_page_count(output), 1)
 
     def test_add_text_watermark_preserves_page_count_and_original_text(self):
         pdf = make_pdf(self.tmp / "doc.pdf", num_pages=2, labels=["Contenu original", "Deuxieme page"])
