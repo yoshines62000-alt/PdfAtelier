@@ -343,6 +343,51 @@ def add_page_numbers(
     _write_output(writer, output_path)
 
 
+# -- proprietes / metadonnees -------------------------------------------------------
+
+_METADATA_FIELDS = {
+    "title": "/Title",
+    "author": "/Author",
+    "subject": "/Subject",
+    "keywords": "/Keywords",
+}
+
+
+def read_metadata(input_path: Path, password: Optional[str] = None) -> dict:
+    """Lit les metadonnees courantes du PDF (titre, auteur, sujet,
+    mots-cles) - une chaine vide si le champ est absent, jamais None, pour
+    que l'appelant puisse toujours pre-remplir un formulaire directement."""
+    reader = _open_reader(input_path, password=password)
+    meta = reader.metadata or {}
+    return {field: (meta.get(key) or "") for field, key in _METADATA_FIELDS.items()}
+
+
+def set_metadata(
+    input_path: Path, output_path: Path, metadata: dict, password: Optional[str] = None,
+) -> None:
+    """Remplace les metadonnees du PDF par exactement celles fournies dans
+    `metadata` (memes cles que read_metadata) - un dict vide (ou avec
+    uniquement des valeurs vides) purge completement le document. Comme
+    set_password/remove_password, reconstruit un PdfWriter neuf avec
+    uniquement les pages (jamais reader.metadata, jamais le /Root complet
+    du reader) : ni le dictionnaire d'informations (docinfo) ni le flux XMP
+    eventuel de la source ne sont jamais copies vers la sortie, purge ou
+    non - seul un appel explicite a add_metadata() en reintroduit. Le
+    /Producer devient "pypdf" a l'ecriture (comportement de la
+    bibliotheque) : la purge ne peut pas l'effacer, seulement le remplacer."""
+    reader = _open_reader(input_path, password=password)
+    writer = PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+    non_empty = {
+        key: str(metadata[field]) for field, key in _METADATA_FIELDS.items()
+        if metadata.get(field)
+    }
+    if non_empty:
+        writer.add_metadata(non_empty)
+    _write_output(writer, output_path)
+
+
 # -- protection par mot de passe --------------------------------------------------
 
 def set_password(
@@ -376,6 +421,35 @@ def extract_text(input_path: Path, password: Optional[str] = None) -> list:
     """Renvoie une liste de chaines, une par page."""
     reader = _open_reader(input_path, password=password)
     return [page.extract_text() or "" for page in reader.pages]
+
+
+def extract_attachments(input_path: Path, output_dir: Path, password: Optional[str] = None) -> list:
+    """Extrait les pieces jointes embarquees dans le PDF (ex: XML Factur-X/
+    ZUGFeRD, images, autres PDF) - invisibles dans un lecteur basique.
+    Les noms de pieces jointes proviennent du document lui-meme, une
+    donnee non fiable : Path(name).name neutralise toute tentative de
+    traversee de repertoire ou de separateur (ex: "..\\evil.txt" devient
+    "evil.txt", toujours ecrit A L'INTERIEUR de output_dir), et un nom vide
+    apres nettoyage retombe sur un nom generique plutot que d'echouer."""
+    reader = _open_reader(input_path, password=password)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_paths = []
+    used_paths = set()
+    for raw_name, contents_list in reader.attachments.items():
+        safe_name = Path(str(raw_name)).name.strip() or "piece_jointe"
+        stem = Path(safe_name).stem or "piece_jointe"
+        suffix = Path(safe_name).suffix
+        for contents in contents_list:
+            output_path = output_dir / safe_name
+            counter = 1
+            while output_path.exists() or output_path in used_paths:
+                output_path = output_dir / f"{stem} ({counter}){suffix}"
+                counter += 1
+            used_paths.add(output_path)
+            output_path.write_bytes(contents)
+            output_paths.append(output_path)
+    return output_paths
 
 
 def extract_embedded_images(

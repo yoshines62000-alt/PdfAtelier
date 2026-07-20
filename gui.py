@@ -67,6 +67,7 @@ class PdfAtelierApp:
         self.page_numbers_tab = ttk.Frame(notebook)
         self.protect_tab = ttk.Frame(notebook)
         self.text_tab = ttk.Frame(notebook)
+        self.properties_tab = ttk.Frame(notebook)
 
         notebook.add(self.merge_tab, text="Fusionner")
         notebook.add(self.split_tab, text="Diviser")
@@ -77,6 +78,7 @@ class PdfAtelierApp:
         notebook.add(self.page_numbers_tab, text="Numeroter")
         notebook.add(self.protect_tab, text="Protection")
         notebook.add(self.text_tab, text="Texte")
+        notebook.add(self.properties_tab, text="Proprietes")
 
         self._build_merge_tab()
         self._build_split_tab()
@@ -87,6 +89,7 @@ class PdfAtelierApp:
         self._build_page_numbers_tab()
         self._build_protect_tab()
         self._build_text_tab()
+        self._build_properties_tab()
 
     # -- utilitaires communs --------------------------------------------------
 
@@ -937,6 +940,25 @@ class PdfAtelierApp:
         ).pack(anchor="w", padx=5)
         ttk.Button(extract_img, text="Extraire les images...", command=self._eei_run).pack(anchor="w", padx=5, pady=5)
 
+        extract_att = ttk.LabelFrame(frame, text="Pieces jointes")
+        extract_att.pack(fill=X, padx=10, pady=(0, 10))
+        self.eea_source_path = None
+        self.eea_source_var = StringVar(value="Aucun fichier choisi")
+        self.eea_password_var = StringVar()
+
+        eea_top = ttk.Frame(extract_att)
+        eea_top.pack(fill=X, padx=5, pady=5)
+        ttk.Button(eea_top, text="Choisir un PDF...", command=self._eea_pick_source).pack(side=LEFT)
+        ttk.Label(eea_top, textvariable=self.eea_source_var).pack(side=LEFT, padx=10)
+        ttk.Label(eea_top, text="Mot de passe (si protege)").pack(side=LEFT, padx=(15, 0))
+        ttk.Entry(eea_top, textvariable=self.eea_password_var, show="*", width=16).pack(side=LEFT, padx=5)
+        ttk.Label(
+            extract_att,
+            text="Recupere les fichiers embarques (XML de facture electronique, images, autres PDF...).",
+            foreground="#666",
+        ).pack(anchor="w", padx=5)
+        ttk.Button(extract_att, text="Extraire les pieces jointes...", command=self._eea_run).pack(anchor="w", padx=5, pady=5)
+
         img_to_pdf = ttk.LabelFrame(frame, text="Images vers PDF")
         img_to_pdf.pack(fill=BOTH, expand=True, padx=10, pady=10)
         self.i2p_files: list = []
@@ -1011,6 +1033,31 @@ class PdfAtelierApp:
                 messagebox.showinfo(APP_TITLE, "Aucune image embarquee trouvee dans ce PDF.")
             else:
                 messagebox.showinfo(APP_TITLE, f"{len(result)} image(s) extraite(s) dans {output_dir}")
+
+    def _eea_pick_source(self):
+        path = self._pick_pdf()
+        if not path:
+            return
+        self.eea_source_path = path
+        self.eea_source_var.set(path.name)
+
+    def _eea_run(self):
+        if not self.eea_source_path:
+            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            return
+        output_dir = filedialog.askdirectory(title="Dossier de destination")
+        if not output_dir:
+            return
+        password = self.eea_password_var.get() or None
+
+        result = self._run_safely(
+            lambda: ops.extract_attachments(self.eea_source_path, output_dir, password=password)
+        )
+        if result is not None:
+            if not result:
+                messagebox.showinfo(APP_TITLE, "Aucune piece jointe trouvee dans ce PDF.")
+            else:
+                messagebox.showinfo(APP_TITLE, f"{len(result)} piece(s) jointe(s) extraite(s) dans {output_dir}")
 
     def _i2p_add_files(self):
         paths = filedialog.askopenfilenames(title="Choisir des images", filetypes=IMAGE_FILETYPES)
@@ -1444,6 +1491,120 @@ class PdfAtelierApp:
             return
         Path(output).write_text(content, encoding="utf-8")
         messagebox.showinfo(APP_TITLE, f"Texte enregistre : {Path(output).name}")
+
+    # -- onglet Proprietes (metadonnees) -----------------------------------------------
+
+    def _build_properties_tab(self):
+        frame = self.properties_tab
+        self.properties_source_path = None
+        self.properties_source_password = None
+        self.properties_source_var = StringVar(value="Aucun fichier choisi")
+        self.properties_title_var = StringVar()
+        self.properties_author_var = StringVar()
+        self.properties_subject_var = StringVar()
+        self.properties_keywords_var = StringVar()
+
+        top = ttk.Frame(frame)
+        top.pack(fill=X, padx=10, pady=10)
+        ttk.Button(top, text="Choisir un PDF...", command=self._properties_pick_source).pack(side=LEFT)
+        ttk.Label(top, textvariable=self.properties_source_var).pack(side=LEFT, padx=10)
+
+        form = ttk.Frame(frame)
+        form.pack(fill=X, padx=10, pady=5)
+        ttk.Label(form, text="Titre").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(form, textvariable=self.properties_title_var, width=50).grid(row=0, column=1, padx=5, sticky="we")
+        ttk.Label(form, text="Auteur").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(form, textvariable=self.properties_author_var, width=50).grid(row=1, column=1, padx=5, sticky="we")
+        ttk.Label(form, text="Sujet").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(form, textvariable=self.properties_subject_var, width=50).grid(row=2, column=1, padx=5, sticky="we")
+        ttk.Label(form, text="Mots-cles").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Entry(form, textvariable=self.properties_keywords_var, width=50).grid(row=3, column=1, padx=5, sticky="we")
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            frame,
+            text="\"Enregistrer sous\" applique les champs ci-dessus. \"Purger\" les efface tous\n"
+                 "(le producteur devient \"pypdf\" a l'ecriture, ce champ ne peut pas etre vide).",
+            foreground="#666", justify=LEFT,
+        ).pack(anchor="w", padx=10, pady=(5, 0))
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(anchor="w", padx=10, pady=10)
+        ttk.Button(buttons, text="Enregistrer sous...", command=self._properties_save).pack(side=LEFT)
+        ttk.Button(buttons, text="Purger les metadonnees...", command=self._properties_purge).pack(side=LEFT, padx=(6, 0))
+
+    def _properties_pick_source(self):
+        path = self._pick_pdf()
+        if not path:
+            return
+        count, password = self._load_page_count_with_password_prompt(path)
+        if count is None:
+            return
+        self.properties_source_path = path
+        self.properties_source_password = password
+        self.properties_source_var.set(path.name)
+        meta = self._run_safely(lambda: ops.read_metadata(path, password=password))
+        if meta is not None:
+            self.properties_title_var.set(meta["title"])
+            self.properties_author_var.set(meta["author"])
+            self.properties_subject_var.set(meta["subject"])
+            self.properties_keywords_var.set(meta["keywords"])
+
+    def _properties_fields(self) -> dict:
+        return {
+            "title": self.properties_title_var.get().strip(),
+            "author": self.properties_author_var.get().strip(),
+            "subject": self.properties_subject_var.get().strip(),
+            "keywords": self.properties_keywords_var.get().strip(),
+        }
+
+    def _properties_save(self):
+        if not self.properties_source_path:
+            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            return
+        output = self._save_pdf_as(f"{self.properties_source_path.stem}_proprietes.pdf")
+        if not output:
+            return
+        if not self._warn_if_output_overwrites_source(self.properties_source_path, output):
+            return
+        metadata = self._properties_fields()
+        self._run_safely(
+            lambda: ops.set_metadata(
+                self.properties_source_path, output, metadata, password=self.properties_source_password,
+            ),
+            f"Proprietes enregistrees : {output.name}",
+        )
+
+    def _properties_purge(self):
+        if not self.properties_source_path:
+            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            return
+        if not messagebox.askyesno(
+            APP_TITLE, "Purger toutes les metadonnees (titre, auteur, sujet, mots-cles) de ce PDF ?",
+        ):
+            return
+        output = self._save_pdf_as(f"{self.properties_source_path.stem}_purge.pdf")
+        if not output:
+            return
+        if not self._warn_if_output_overwrites_source(self.properties_source_path, output):
+            return
+        def purge_action():
+            # set_metadata ne renvoie rien (None) meme en cas de succes -
+            # `_run_safely` distingue echec/succes via son retour (None =
+            # exception capturee), ce qui serait ambigu avec une action dont
+            # le succes renvoie aussi None. On renvoie donc explicitement
+            # True pour que le nettoyage des champs ci-dessous ne s'execute
+            # QUE si la purge a reellement reussi (bug trouve en testant : le
+            # nettoyage ne se declenchait jamais, meme apres une purge reussie).
+            ops.set_metadata(self.properties_source_path, output, {}, password=self.properties_source_password)
+            return True
+
+        result = self._run_safely(purge_action, f"Metadonnees purgees : {output.name}")
+        if result:
+            self.properties_title_var.set("")
+            self.properties_author_var.set("")
+            self.properties_subject_var.set("")
+            self.properties_keywords_var.set("")
 
 
 def ttk_listbox(parent, height=12, selectmode="browse"):

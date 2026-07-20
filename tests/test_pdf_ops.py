@@ -422,6 +422,132 @@ class PdfOpsTestCase(unittest.TestCase):
         self.assertEqual(len(texts), 3)
         self.assertIn("Deux", texts[1])
 
+    # -- metadonnees --------------------------------------------------------------
+
+    def test_read_metadata_returns_empty_strings_when_nothing_is_set(self):
+        # reportlab (make_pdf) remplit des valeurs par defaut ("untitled",
+        # "anonymous"...) dans le docinfo : ce test verifie donc plutot le
+        # cas "vraiment vide" via un PdfWriter neuf, sans passer par
+        # set_metadata (qui, lui, est deja teste separement pour la purge).
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        pdf = self.tmp / "vierge.pdf"
+        with open(pdf, "wb") as f:
+            writer.write(f)
+        meta = ops.read_metadata(pdf)
+        self.assertEqual(meta, {"title": "", "author": "", "subject": "", "keywords": ""})
+
+    def test_set_then_read_metadata_round_trip(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1, labels=["Contenu"])
+        output = self.tmp / "avec_metadonnees.pdf"
+        ops.set_metadata(pdf, output, {
+            "title": "Rapport été", "author": "Bob", "subject": "Sujet", "keywords": "mots,cles",
+        })
+        meta = ops.read_metadata(output)
+        self.assertEqual(meta["title"], "Rapport été")
+        self.assertEqual(meta["author"], "Bob")
+        self.assertEqual(meta["subject"], "Sujet")
+        self.assertEqual(meta["keywords"], "mots,cles")
+        # Le contenu des pages est toujours preserve.
+        self.assertIn("Contenu", ops.extract_text(output)[0])
+
+    def test_set_metadata_with_empty_dict_purges_everything(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
+        with_meta = self.tmp / "avec.pdf"
+        ops.set_metadata(pdf, with_meta, {"title": "A purger", "author": "Quelqu'un"})
+        self.assertEqual(ops.read_metadata(with_meta)["title"], "A purger")
+
+        purged = self.tmp / "purge.pdf"
+        ops.set_metadata(with_meta, purged, {})
+        meta = ops.read_metadata(purged)
+        self.assertEqual(meta["title"], "")
+        self.assertEqual(meta["author"], "")
+
+    def test_set_metadata_strips_xmp_from_the_source(self):
+        # Construit une source avec un flux XMP explicite au niveau racine
+        # (comme le produirait Office/InDesign), pour verifier que
+        # set_metadata ne le recopie jamais vers la sortie.
+        from pypdf.generic import NameObject, DecodedStreamObject
+        src_writer = PdfWriter()
+        src_writer.add_blank_page(200, 200)
+        xmp_stream = DecodedStreamObject()
+        xmp_stream.set_data(b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><fake/></x:xmpmeta>')
+        xmp_ref = src_writer._add_object(xmp_stream)
+        src_writer._root_object[NameObject("/Metadata")] = xmp_ref
+        source = self.tmp / "avec_xmp.pdf"
+        with open(source, "wb") as f:
+            src_writer.write(f)
+        self.assertIn("/Metadata", PdfReader(str(source)).trailer["/Root"])
+
+        output = self.tmp / "sans_xmp.pdf"
+        ops.set_metadata(source, output, {})
+        self.assertNotIn("/Metadata", PdfReader(str(output)).trailer["/Root"])
+
+    def test_set_metadata_on_encrypted_pdf_requires_password(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+        with self.assertRaises(ops.PdfOpsError):
+            ops.set_metadata(protected, self.tmp / "out.pdf", {"title": "X"})
+        ops.set_metadata(protected, self.tmp / "out.pdf", {"title": "X"}, password="secret")
+        self.assertEqual(ops.read_metadata(self.tmp / "out.pdf")["title"], "X")
+
+    # -- pieces jointes -------------------------------------------------------------
+
+    def test_extract_attachments_recovers_the_exact_content(self):
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        writer.add_attachment("facture.xml", b"<xml>contenu</xml>")
+        pdf = self.tmp / "avec_pj.pdf"
+        with open(pdf, "wb") as f:
+            writer.write(f)
+
+        extracted = ops.extract_attachments(pdf, self.tmp / "out")
+        self.assertEqual(len(extracted), 1)
+        self.assertEqual(extracted[0].name, "facture.xml")
+        self.assertEqual(extracted[0].read_bytes(), b"<xml>contenu</xml>")
+
+    def test_extract_attachments_on_pdf_without_any_returns_empty_list(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
+        self.assertEqual(ops.extract_attachments(pdf, self.tmp / "out"), [])
+
+    def test_extract_attachments_with_the_same_name_twice_produces_two_files(self):
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        writer.add_attachment("piece.txt", b"premiere")
+        writer.add_attachment("piece.txt", b"seconde")
+        pdf = self.tmp / "avec_pj.pdf"
+        with open(pdf, "wb") as f:
+            writer.write(f)
+
+        extracted = ops.extract_attachments(pdf, self.tmp / "out")
+        self.assertEqual(len(extracted), 2)
+        contents = {p.read_bytes() for p in extracted}
+        self.assertEqual(contents, {b"premiere", b"seconde"})
+
+    def test_extract_attachments_sanitizes_a_path_traversal_name(self):
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        writer.add_attachment("..\\..\\evil.txt", b"malveillant")
+        pdf = self.tmp / "avec_pj.pdf"
+        with open(pdf, "wb") as f:
+            writer.write(f)
+
+        output_dir = self.tmp / "out"
+        extracted = ops.extract_attachments(pdf, output_dir)
+        self.assertEqual(len(extracted), 1)
+        self.assertEqual(extracted[0].name, "evil.txt")
+        self.assertEqual(extracted[0].parent.resolve(), output_dir.resolve())
+
+    def test_extract_attachments_on_encrypted_pdf_requires_password(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+        with self.assertRaises(ops.PdfOpsError):
+            ops.extract_attachments(protected, self.tmp / "out")
+        # Le mot de passe correct fonctionne (aucune piece jointe dans ce fichier).
+        self.assertEqual(ops.extract_attachments(protected, self.tmp / "out", password="secret"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
