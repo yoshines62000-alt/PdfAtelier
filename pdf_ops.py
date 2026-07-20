@@ -84,17 +84,34 @@ def merge_pdfs(input_paths: list, output_path: Path, passwords: Optional[list] =
 
 def split_pdf_by_ranges(input_path: Path, ranges: list, output_dir: Path, base_name: str, password: Optional[str] = None) -> list:
     """ranges : liste de tuples (debut, fin) en 1-indexe, inclusifs des deux
-    cotes. Renvoie la liste des chemins generes."""
+    cotes. Renvoie la liste des chemins generes.
+
+    Relancer une division vers le meme dossier (meme fichier redivise, ou
+    deux fichiers source de meme nom depuis des dossiers differents)
+    produirait sinon les memes noms de fichiers de sortie que la fois
+    precedente, la nouvelle execution ecrasant silencieusement les resultats
+    d'avant - bug trouve a l'audit. On applique ici le meme mecanisme de
+    contournement de collision (verifier `.exists()` sur le disque, pas
+    seulement les noms deja generes pendant cet appel) que celui deja en
+    place dans extract_attachments/extract_embedded_images."""
     reader = _open_reader(input_path, password=password)
     page_count = len(reader.pages)
+    output_dir = Path(output_dir)
     output_paths = []
+    used_paths = set()
     for index, (start, end) in enumerate(ranges, start=1):
         if start < 1 or end > page_count or start > end:
             raise PdfOpsError(f"Plage de pages invalide : {start}-{end} (document de {page_count} pages).")
         writer = PdfWriter()
         for page_number in range(start, end + 1):
             writer.add_page(reader.pages[page_number - 1])
-        output_path = Path(output_dir) / f"{base_name}_{index:02d}_p{start}-{end}.pdf"
+        stem = f"{base_name}_{index:02d}_p{start}-{end}"
+        output_path = output_dir / f"{stem}.pdf"
+        counter = 1
+        while output_path.exists() or output_path in used_paths:
+            output_path = output_dir / f"{stem} ({counter}).pdf"
+            counter += 1
+        used_paths.add(output_path)
         _write_output(writer, output_path)
         output_paths.append(output_path)
     return output_paths
@@ -210,7 +227,23 @@ def compress_pdf(
 
 # -- conversion image <-> PDF ---------------------------------------------------
 
-def pdf_to_images(input_path: Path, output_dir: Path, base_name: str, dpi: int = 150, fmt: str = "png") -> list:
+def pdf_to_images(
+    input_path: Path, output_dir: Path, base_name: str, dpi: int = 150, fmt: str = "png",
+    quality: int = 90, progress_callback: Optional[callable] = None,
+) -> list:
+    """quality : qualite JPEG (1 = tres compresse, 95 = quasi sans perte),
+    utilisee uniquement quand `fmt` est "jpg"/"jpeg" (ignoree par Pillow pour
+    le PNG, format sans perte). progress_callback(done, total), si fourni,
+    est appele apres chaque page rendue - utilise par le GUI pour afficher
+    une progression sur les conversions haute resolution/nombreuses pages.
+
+    Relancer une conversion vers le meme dossier (meme PDF reconverti, ou
+    deux PDF de meme nom depuis des dossiers differents) produirait sinon les
+    memes noms de fichiers de sortie que la fois precedente, la nouvelle
+    execution ecrasant silencieusement les images d'avant - bug trouve a
+    l'audit, corrige avec le meme mecanisme de contournement de collision
+    (verifier `.exists()` sur le disque) que celui deja en place dans
+    extract_attachments/extract_embedded_images/split_pdf_by_ranges."""
     import pypdfium2 as pdfium
 
     output_dir = Path(output_dir)
@@ -218,15 +251,30 @@ def pdf_to_images(input_path: Path, output_dir: Path, base_name: str, dpi: int =
     scale = dpi / 72.0
     pdf = pdfium.PdfDocument(str(input_path))
     output_paths = []
+    used_paths = set()
     try:
+        total = len(pdf)
         for index, page in enumerate(pdf, start=1):
             bitmap = page.render(scale=scale)
             image = bitmap.to_pil()
             bitmap.close()
             page.close()
-            output_path = output_dir / f"{base_name}_p{index:03d}.{fmt}"
-            image.save(output_path)
+            stem = f"{base_name}_p{index:03d}"
+            output_path = output_dir / f"{stem}.{fmt}"
+            counter = 1
+            while output_path.exists() or output_path in used_paths:
+                output_path = output_dir / f"{stem} ({counter}).{fmt}"
+                counter += 1
+            used_paths.add(output_path)
+            save_kwargs = {}
+            if fmt.lower() in ("jpg", "jpeg"):
+                save_kwargs["quality"] = quality
+                if image.mode not in ("RGB", "L"):
+                    image = image.convert("RGB")
+            image.save(output_path, **save_kwargs)
             output_paths.append(output_path)
+            if progress_callback:
+                progress_callback(index, total)
     finally:
         pdf.close()
     return output_paths

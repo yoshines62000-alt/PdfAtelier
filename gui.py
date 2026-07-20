@@ -5,7 +5,9 @@ envoye a un service en ligne."""
 
 from __future__ import annotations
 
+import queue
 import sys
+import threading
 import webbrowser
 from pathlib import Path
 from typing import Optional
@@ -362,12 +364,24 @@ class PdfAtelierApp:
         # desambiguisation, la seconde ecraserait silencieusement le
         # resultat de la premiere tout en etant comptee comme un succes a
         # part entiere dans le resume (bug trouve a l'audit).
+        #
+        # Il ne suffit pas non plus de dedoublonner uniquement contre les
+        # autres sources DE CE LOT (`used_outputs`) : relancer le meme
+        # traitement (Compresser, Filigrane, Numeroter, Protection...) vers
+        # le meme dossier de destination reutilise exactement les memes noms
+        # generes que la fois precedente et ecraserait alors silencieusement
+        # des resultats DEJA PRESENTS SUR DISQUE (second bug, distinct du
+        # premier, trouve au meme audit) - d'ou le test `candidate.exists()`
+        # en plus de `candidate in used_outputs`, meme mecanisme que celui
+        # deja en place dans extract_attachments/extract_embedded_images
+        # (pdf_ops.py) et desormais aussi dans split_pdf_by_ranges/
+        # pdf_to_images.
         pairs = []
         used_outputs = set()
         for src in sources:
             candidate = Path(output_dir) / f"{src.stem}{batch_suffix}.pdf"
             counter = 1
-            while candidate in used_outputs:
+            while candidate.exists() or candidate in used_outputs:
                 candidate = Path(output_dir) / f"{src.stem}{batch_suffix} ({counter}).pdf"
                 counter += 1
             used_outputs.add(candidate)
@@ -377,14 +391,22 @@ class PdfAtelierApp:
                 return None
         return pairs
 
-    def _run_batch(self, pairs: list, action_for_pair):
+    def _run_batch(self, pairs: list, action_for_pair, report=None):
         """Execute action_for_pair(source, output) pour chaque paire, sans
         jamais interrompre les autres fichiers sur l'echec de l'un (chaque
         erreur, attendue ou non, est capturee individuellement). Renvoie
         (succes, echecs) : succes est une liste de (source, output,
-        resultat_de_l_action), echecs une liste de (source, message)."""
+        resultat_de_l_action), echecs une liste de (source, message).
+
+        `report`, si fourni, est appele apres CHAQUE fichier traite (succes
+        ou echec) avec (fait, total, nom_du_fichier_traite) - utilise pour
+        alimenter la barre de progression quand ce lot tourne dans un thread
+        separe (voir _run_in_background_with_progress). Ne touche jamais a
+        Tkinter directement ici : cette methode peut donc s'executer aussi
+        bien sur le thread principal (comme avant) que sur un thread worker."""
         successes, failures = [], []
-        for source, output in pairs:
+        total = len(pairs)
+        for index, (source, output) in enumerate(pairs, start=1):
             try:
                 result = action_for_pair(source, output)
             except ops.PdfOpsError as exc:
@@ -393,21 +415,121 @@ class PdfAtelierApp:
                 failures.append((source, f"erreur inattendue : {exc}"))
             else:
                 successes.append((source, output, result))
+            if report:
+                report(index, total, source.name)
         return successes, failures
 
-    def _show_batch_summary(self, successes: list, failures: list, verb: str):
+    def _show_batch_summary(self, successes: list, failures: list, verb: str, extra_note: Optional[str] = None):
         lines = [f"{len(successes)} fichier(s) {verb} avec succes."]
+        if extra_note:
+            lines.append(extra_note)
         if failures:
             lines.append(f"{len(failures)} echec(s) :")
             for source, message in failures:
                 lines.append(f"  - {source.name} : {message}")
         messagebox.showinfo(APP_TITLE, "\n".join(lines))
 
+    def _run_in_background_with_progress(self, work, on_done):
+        """Execute `work(report)` dans un thread separe pendant qu'une
+        fenetre modale affiche une barre de progression, pour ne jamais
+        geler l'interface le temps d'un traitement en lot ou d'une
+        conversion PDF->images sur de nombreuses pages (aucun retour de
+        progression n'existait auparavant - confirme a l'audit par
+        l'absence totale de `threading`/`Progressbar` dans tout gui.py,
+        alors que ces operations peuvent prendre plusieurs dizaines de
+        secondes sur de gros fichiers/lots).
+
+        `work` s'execute sur le thread worker et ne doit JAMAIS toucher a un
+        widget Tkinter directement (Tkinter n'est pas thread-safe) : il peut
+        uniquement appeler `report(fait, total, message="")`, qui se contente
+        de deposer l'information dans une queue.Queue (thread-safe). Toute
+        variable Tkinter necessaire a `work` (IntVar.get(), etc.) doit donc
+        etre lue par l'appelant AVANT de lancer ce thread, jamais dedans.
+
+        `on_done(resultat, erreur)` est appele sur le THREAD PRINCIPAL (via
+        root.after, comme le reste de l'UI) une fois le travail termine :
+        `erreur` est l'exception levee par `work` le cas echeant (None sinon),
+        `resultat` est sa valeur de retour (None en cas d'erreur)."""
+        message_queue: "queue.Queue" = queue.Queue()
+
+        dialog = Toplevel(self.root)
+        dialog.title(APP_TITLE)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # pas de fermeture manuelle en cours de traitement
+        ttk.Label(dialog, text="Traitement en cours...").pack(padx=20, pady=(15, 5))
+        status_var = StringVar(value="")
+        progress_bar = ttk.Progressbar(dialog, orient=HORIZONTAL, mode="determinate", length=320)
+        progress_bar.pack(padx=20, pady=5)
+        ttk.Label(dialog, textvariable=status_var, foreground="#666").pack(padx=20, pady=(0, 15))
+        dialog.update_idletasks()
+        try:
+            dialog.grab_set()
+        except Exception:
+            pass  # environnement sans focus (ex: tests) - la modalite n'est qu'un confort
+
+        def report(done, total, message=""):
+            message_queue.put(("progress", done, total, message))
+
+        result_holder = {}
+
+        def worker():
+            try:
+                result_holder["result"] = work(report)
+            except Exception as exc:
+                result_holder["error"] = exc
+            message_queue.put(("done", None, None, None))
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        def poll():
+            try:
+                while True:
+                    kind, done, total, message = message_queue.get_nowait()
+                    if kind == "progress":
+                        progress_bar.configure(value=done, maximum=max(total, 1))
+                        status_var.set(message or f"{done} / {total}")
+                    elif kind == "done":
+                        try:
+                            dialog.grab_release()
+                        except Exception:
+                            pass
+                        dialog.destroy()
+                        on_done(result_holder.get("result"), result_holder.get("error"))
+                        return
+            except queue.Empty:
+                pass
+            self.root.after(80, poll)
+
+        self.root.after(80, poll)
+
+    def _run_batch_with_progress(self, pairs: list, action_for_pair, verb: str):
+        """Enveloppe _run_in_background_with_progress pour le cas le plus
+        courant : executer un lot dans un thread separe avec barre de
+        progression, puis afficher le resume standard (_show_batch_summary)
+        une fois termine. Utilise par Filigrane, Numeroter et Protection
+        (mode lot) - Compresser garde son propre on_done, plus riche
+        (agregat de taille + echecs de recompression d'image par fichier)."""
+
+        def work(report):
+            return self._run_batch(pairs, action_for_pair, report=report)
+
+        def on_done(result, error):
+            if error is not None:
+                messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
+                return
+            successes, failures = result
+            self._show_batch_summary(successes, failures, verb)
+
+        self._run_in_background_with_progress(work, on_done)
+
     # -- onglet Fusionner -------------------------------------------------------
 
     def _build_merge_tab(self):
         frame = self.merge_tab
         self.merge_files: list = []
+        self.merge_passwords: dict = {}
 
         ttk.Label(frame, text="Fichiers a fusionner, dans l'ordre :").pack(anchor="w", padx=10, pady=(10, 0))
 
@@ -416,9 +538,15 @@ class PdfAtelierApp:
         self.merge_listbox = ttk_listbox(body)
         self.merge_listbox.pack(side=LEFT, fill=BOTH, expand=True)
         self.merge_listbox.bind("<<ListboxSelect>>", self._merge_on_select)
+        # Meme mecanisme de collecte des mots de passe que Compresser/
+        # Filigrane/Numeroter (_add_pdfs_with_password_prompt) : sans lui,
+        # un PDF protege ajoute a la fusion echouait systematiquement au
+        # moment de fusionner, alors que pdf_ops.merge_pdfs supporte deja un
+        # mot de passe par fichier (parametre `passwords`, jamais branche
+        # cote GUI - bug trouve a l'audit).
         self._register_pdf_drop(
             self.merge_listbox, self.merge_files,
-            lambda: self._reload_listbox(self.merge_listbox, self.merge_files), prompt_password=False,
+            lambda: self._reload_listbox(self.merge_listbox, self.merge_files), self.merge_passwords,
         )
 
         self.merge_preview_label = ttk.Label(body, text="(apercu)")
@@ -436,8 +564,7 @@ class PdfAtelierApp:
         ttk.Button(frame, text="Fusionner en un seul PDF...", command=self._merge_run).pack(anchor="w", padx=10, pady=10)
 
     def _merge_add_files(self):
-        paths = self._pick_pdfs()
-        self.merge_files.extend(paths)
+        self._add_pdfs_with_password_prompt(self.merge_files, self.merge_passwords)
         self._reload_listbox(self.merge_listbox, self.merge_files)
 
     def _merge_move(self, delta):
@@ -454,6 +581,7 @@ class PdfAtelierApp:
 
     def _merge_clear(self):
         self.merge_files.clear()
+        self.merge_passwords.clear()
         self._reload_listbox(self.merge_listbox, self.merge_files)
         self.merge_preview_label.configure(text="(apercu)", image="")
 
@@ -463,7 +591,7 @@ class PdfAtelierApp:
             return
         path = self.merge_files[selection[0]]
         try:
-            image = self._render_pdf_page_image(path, None, 1)
+            image = self._render_pdf_page_image(path, self.merge_passwords.get(self._resolve(path)), 1)
             from PIL import ImageTk
 
             image.thumbnail((220, 300))
@@ -482,7 +610,11 @@ class PdfAtelierApp:
             return
         if not self._warn_if_output_overwrites_source(self.merge_files, output):
             return
-        self._run_safely(lambda: ops.merge_pdfs(self.merge_files, output), f"PDF fusionne enregistre : {output.name}")
+        passwords = [self.merge_passwords.get(self._resolve(path)) for path in self.merge_files]
+        self._run_safely(
+            lambda: ops.merge_pdfs(self.merge_files, output, passwords=passwords),
+            f"PDF fusionne enregistre : {output.name}",
+        )
 
     # -- onglet Diviser ---------------------------------------------------------
 
@@ -764,8 +896,17 @@ class PdfAtelierApp:
     def _pages_reset(self):
         if not self.pages_source_path:
             return
-        count, _ = self._load_page_count_with_password_prompt(self.pages_source_path)
-        if count is None:
+        # Le mot de passe du fichier source est deja connu depuis
+        # _pages_load (stocke dans self.pages_source_password) : le
+        # redemander ici via _load_page_count_with_password_prompt etait une
+        # sollicitation inutile pour l'utilisateur a chaque "Tout restaurer"
+        # sur un document protege (bug trouve a l'audit) - _split_open_
+        # visual_picker reutilise deja correctement le mot de passe stocke
+        # de la meme maniere.
+        try:
+            count = ops.get_page_count(self.pages_source_path, password=self.pages_source_password)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Impossible de lire ce PDF : {exc}")
             return
         self.page_state = [{"page": i, "rotation": 0} for i in range(1, count + 1)]
         self._pages_reload_listbox()
@@ -880,21 +1021,51 @@ class PdfAtelierApp:
                 messagebox.showinfo(APP_TITLE, f"PDF compresse enregistre : {output.name}")
             return
 
-        successes, failures = self._run_batch(
-            pairs,
-            lambda source, output: ops.compress_pdf(
-                source, output, image_quality=quality, max_dimension=max_dim,
-                password=self.compress_passwords.get(self._resolve(source)),
-            ),
-        )
-        if successes:
-            total_original = sum(r.original_size for _, _, r in successes)
-            total_compressed = sum(r.compressed_size for _, _, r in successes)
-            ratio = round(100 * (1 - total_compressed / total_original), 1) if total_original else 0.0
-            self.compress_result_var.set(
-                f"{_format_size(total_original)} -> {_format_size(total_compressed)} ({ratio:g} % de reduction au total)"
+        def work(report):
+            return self._run_batch(
+                pairs,
+                lambda source, output: ops.compress_pdf(
+                    source, output, image_quality=quality, max_dimension=max_dim,
+                    password=self.compress_passwords.get(self._resolve(source)),
+                ),
+                report=report,
             )
-        self._show_batch_summary(successes, failures, "compresse(s)")
+
+        def on_done(result, error):
+            if error is not None:
+                messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
+                return
+            successes, failures = result
+            extra_note = None
+            if successes:
+                total_original = sum(r.original_size for _, _, r in successes)
+                total_compressed = sum(r.compressed_size for _, _, r in successes)
+                ratio = round(100 * (1 - total_compressed / total_original), 1) if total_original else 0.0
+                summary = (
+                    f"{_format_size(total_original)} -> {_format_size(total_compressed)} "
+                    f"({ratio:g} % de reduction au total)"
+                )
+                # Le mode fichier unique affiche deja les echecs de
+                # recompression d'image individuelle (CompressionResult.
+                # images_failed) - le mode lot ne les affichait jamais,
+                # laissant croire a une compression parfaite alors que
+                # certaines images embarquees etaient simplement conservees
+                # telles quelles (bug trouve a l'audit).
+                total_images_failed = sum(r.images_failed for _, _, r in successes)
+                if total_images_failed:
+                    summary += (
+                        f" - {total_images_failed} image(s) au total n'ont pas pu etre recompressees"
+                    )
+                    failed_files = [source.name for source, _, r in successes if r.images_failed]
+                    extra_note = (
+                        f"{total_images_failed} image(s) n'ont pas pu etre recompressees (format non "
+                        "supporte) et ont ete conservees telles quelles, dans "
+                        f"{len(failed_files)} fichier(s) : " + ", ".join(failed_files)
+                    )
+                self.compress_result_var.set(summary)
+            self._show_batch_summary(successes, failures, "compresse(s)", extra_note=extra_note)
+
+        self._run_in_background_with_progress(work, on_done)
 
     # -- onglet Convertir -----------------------------------------------------------
 
@@ -907,6 +1078,11 @@ class PdfAtelierApp:
         self.p2i_source_var = StringVar(value="Aucun fichier choisi")
         self.p2i_dpi_var = IntVar(value=150)
         self.p2i_format_var = StringVar(value="png")
+        # Qualite JPEG reglable (ignoree pour le PNG, format sans perte) -
+        # jusqu'ici image.save(output_path) partait sans aucun parametre de
+        # qualite, contrairement a la compression qui a deja un curseur
+        # dedie (bug/manque trouve a l'audit).
+        self.p2i_quality_var = IntVar(value=90)
 
         top = ttk.Frame(pdf_to_img)
         top.pack(fill=X, padx=5, pady=5)
@@ -919,6 +1095,12 @@ class PdfAtelierApp:
         ttk.Entry(options, textvariable=self.p2i_dpi_var, width=6).pack(side=LEFT, padx=5)
         ttk.Label(options, text="Format").pack(side=LEFT, padx=(15, 0))
         ttk.Combobox(options, textvariable=self.p2i_format_var, values=["png", "jpg"], width=6, state="readonly").pack(side=LEFT, padx=5)
+
+        quality_row = ttk.Frame(pdf_to_img)
+        quality_row.pack(fill=X, padx=5, pady=(0, 5))
+        ttk.Label(quality_row, text="Qualite JPEG (utilisee seulement pour le format jpg)").pack(side=LEFT)
+        ttk.Scale(quality_row, from_=1, to=95, orient=HORIZONTAL, variable=self.p2i_quality_var, length=220).pack(side=LEFT, padx=5)
+
         ttk.Button(pdf_to_img, text="Convertir en images...", command=self._p2i_run).pack(anchor="w", padx=5, pady=5)
 
         extract_img = ttk.LabelFrame(frame, text="Extraire les images embarquees")
@@ -996,17 +1178,45 @@ class PdfAtelierApp:
             return
         base_name = self.p2i_source_path.stem
 
-        def action():
-            # Lus ici, pas avant : un DPI non numerique leverait TclError,
-            # capturee par _run_safely plutot que de faire planter le
-            # callback silencieusement.
+        try:
+            # Lus ici, sur le thread principal, PAS dans `work` ci-dessous :
+            # `work` s'execute sur un thread separe (voir
+            # _run_in_background_with_progress) et Tkinter n'est pas
+            # thread-safe - toute variable Tkinter necessaire au traitement
+            # doit etre convertie en valeur Python normale avant de lancer
+            # le thread. Un DPI non numerique leve ici TclError, capturee
+            # comme ailleurs plutot que de faire planter le callback.
             dpi = self.p2i_dpi_var.get()
             fmt = self.p2i_format_var.get()
-            return ops.pdf_to_images(self.p2i_source_path, output_dir, base_name, dpi=dpi, fmt=fmt)
+            quality = self.p2i_quality_var.get()
+        except Exception as exc:
+            messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+            return
 
-        result = self._run_safely(action)
-        if result is not None:
+        # La conversion PDF->images peut prendre du temps sur un document de
+        # nombreuses pages/haute resolution : execute dans un thread separe
+        # avec barre de progression (par page) plutot que de geler l'UI le
+        # temps du traitement (absence totale de retour de progression
+        # confirmee a l'audit).
+        def work(report):
+            def progress_cb(done, total):
+                report(done, total, f"{done} / {total} page(s) converties")
+
+            return ops.pdf_to_images(
+                self.p2i_source_path, output_dir, base_name, dpi=dpi, fmt=fmt, quality=quality,
+                progress_callback=progress_cb,
+            )
+
+        def on_done(result, error):
+            if error is not None:
+                if isinstance(error, ops.PdfOpsError):
+                    messagebox.showwarning(APP_TITLE, str(error))
+                else:
+                    messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
+                return
             messagebox.showinfo(APP_TITLE, f"{len(result)} image(s) generee(s) dans {output_dir}")
+
+        self._run_in_background_with_progress(work, on_done)
 
     def _eei_pick_source(self):
         path = self._pick_pdf()
@@ -1170,8 +1380,7 @@ class PdfAtelierApp:
             self._run_safely(lambda: make_action(source, output), f"Filigrane applique : {output.name}")
             return
 
-        successes, failures = self._run_batch(pairs, make_action)
-        self._show_batch_summary(successes, failures, "traite(s) (filigrane applique)")
+        self._run_batch_with_progress(pairs, make_action, "traite(s) (filigrane applique)")
 
     # -- onglet Numeroter ---------------------------------------------------------------
 
@@ -1270,14 +1479,28 @@ class PdfAtelierApp:
             self._run_safely(lambda: make_action(source, output), f"Pages numerotees : {output.name}")
             return
 
-        successes, failures = self._run_batch(pairs, make_action)
-        self._show_batch_summary(successes, failures, "traite(s) (pages numerotees)")
+        self._run_batch_with_progress(pairs, make_action, "traite(s) (pages numerotees)")
 
     # -- onglet Protection ------------------------------------------------------------
 
     def _build_protect_tab(self):
         frame = self.protect_tab
         self.protect_sources: list = []
+        # Mot de passe ACTUEL de chaque fichier source deja protege (distinct
+        # du nouveau mot de passe a appliquer, saisi lui dans protect_
+        # password_var) - collecte au moment de l'ajout, meme mecanisme que
+        # Compresser/Filigrane/Numeroter (_add_pdfs_with_password_prompt).
+        # Sans lui, re-proteger un PDF deja protege etait impossible : le mot
+        # de passe saisi par l'utilisateur n'etait jamais transmis en tant
+        # que mot de passe ACTUEL a pdf_ops.set_password, qui ne peut alors
+        # meme pas ouvrir le fichier source pour le re-chiffrer (bug trouve
+        # a l'audit). Collecte a la volee dans _protect_run (mode "add"
+        # uniquement, voir _protect_prompt_for_current_passwords) plutot
+        # qu'a l'ajout des fichiers : le mode "Retirer" applique deja un
+        # seul mot de passe partage saisi dans le champ principal et ne doit
+        # pas se voir imposer une demande de mot de passe supplementaire par
+        # fichier des l'ajout, qui serait alors redondante avec ce champ.
+        self.protect_current_passwords: dict = {}
         self.protect_mode_var = StringVar(value="add")
         self.protect_password_var = StringVar()
         self.protect_confirm_var = StringVar()
@@ -1327,30 +1550,68 @@ class PdfAtelierApp:
 
     def _protect_clear(self):
         self.protect_sources.clear()
+        self.protect_current_passwords.clear()
         self._reload_listbox(self.protect_listbox, self.protect_sources)
+
+    def _protect_prompt_for_current_passwords(self) -> bool:
+        """Pour chaque source deja protegee et pas encore connue dans
+        self.protect_current_passwords, tente une lecture sans mot de passe
+        (comme _load_page_count_with_password_prompt) pour detecter la
+        protection, puis demande le mot de passe ACTUEL si besoin - requis
+        par pdf_ops.set_password pour pouvoir ne serait-ce qu'ouvrir un
+        fichier deja protege avant de le re-chiffrer avec le nouveau mot de
+        passe. Renvoie False (et a deja affiche un message) si l'operation
+        doit etre annulee (mot de passe actuel manquant/annule)."""
+        for source in self.protect_sources:
+            resolved = self._resolve(source)
+            if resolved in self.protect_current_passwords:
+                continue
+            try:
+                ops.get_page_count(source)
+            except ops.PdfOpsError:
+                current = self._prompt_for_password(source.name)
+                if not current:
+                    messagebox.showwarning(
+                        APP_TITLE, f"Mot de passe actuel requis pour re-proteger '{source.name}'.",
+                    )
+                    return False
+                self.protect_current_passwords[resolved] = current
+            except Exception:
+                pass  # erreur de lecture non liee a la protection : remontera normalement au traitement
+        return True
 
     def _protect_run(self):
         if not self.protect_sources:
             messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
             return
-        password = self.protect_password_var.get()
+        new_password = self.protect_password_var.get()
         mode = self.protect_mode_var.get()
 
         if mode == "add":
-            if password != self.protect_confirm_var.get():
+            if new_password != self.protect_confirm_var.get():
                 messagebox.showwarning(APP_TITLE, "Les deux mots de passe ne correspondent pas.")
+                return
+            if not self._protect_prompt_for_current_passwords():
                 return
             pairs = self._resolve_batch_outputs(self.protect_sources, "protege.pdf", "_protege")
             if pairs is None:
                 return
-            make_action = lambda source, output: ops.set_password(source, output, password)
+            # `password=` est le mot de passe ACTUEL du fichier source (deja
+            # collecte a l'ajout pour les fichiers detectes comme proteges,
+            # None pour un fichier non protege) ; `new_password` (premier
+            # argument positionnel apres output) est le nouveau mot de passe
+            # a appliquer - ce sont deux parametres distincts de
+            # pdf_ops.set_password, jamais confondus.
+            make_action = lambda source, output: ops.set_password(
+                source, output, new_password, password=self.protect_current_passwords.get(self._resolve(source)),
+            )
             success_verb = "protege(s)"
             single_message = lambda output: f"PDF protege enregistre : {output.name}"
         else:
             pairs = self._resolve_batch_outputs(self.protect_sources, "sans_mot_de_passe.pdf", "_sans_mot_de_passe")
             if pairs is None:
                 return
-            make_action = lambda source, output: ops.remove_password(source, output, password)
+            make_action = lambda source, output: ops.remove_password(source, output, new_password)
             success_verb = "deprotege(s)"
             single_message = lambda output: f"Protection retiree : {output.name}"
 
@@ -1359,8 +1620,7 @@ class PdfAtelierApp:
             self._run_safely(lambda: make_action(source, output), single_message(output))
             return
 
-        successes, failures = self._run_batch(pairs, make_action)
-        self._show_batch_summary(successes, failures, success_verb)
+        self._run_batch_with_progress(pairs, make_action, success_verb)
 
     # -- onglet Texte -------------------------------------------------------------------
 

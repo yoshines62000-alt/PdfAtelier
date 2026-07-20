@@ -153,6 +153,40 @@ class PdfOpsTestCase(unittest.TestCase):
         page_counts = [ops.get_page_count(p) for p in paths]
         self.assertEqual(page_counts, [2, 2, 1])
 
+    def test_split_pdf_by_ranges_avoids_overwriting_pre_existing_files_on_disk(self):
+        # Regression trouvee a l'audit : relancer une division vers le meme
+        # dossier (meme fichier redivise, ou deux fichiers de meme nom
+        # depuis des dossiers differents) generait exactement les memes noms
+        # de sortie que la fois precedente, la seconde execution ecrasant
+        # silencieusement les resultats de la premiere.
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=5, labels=[f"P{i}" for i in range(1, 6)])
+        out_dir = self.tmp / "split"
+        first = ops.split_pdf_by_ranges(pdf, [(1, 2), (3, 5)], out_dir, "doc")
+        second = ops.split_pdf_by_ranges(pdf, [(1, 2), (3, 5)], out_dir, "doc")
+
+        self.assertEqual(len(first), 2)
+        self.assertEqual(len(second), 2)
+        self.assertEqual(len(set(first) | set(second)), 4)  # 4 fichiers distincts, aucune collision
+        for p in first + second:
+            self.assertTrue(p.exists())
+        # Le contenu de la premiere execution n'a pas ete ecrase.
+        self.assertIn("P1", ops.extract_text(first[0])[0])
+
+    def test_split_pdf_by_ranges_avoids_overwriting_a_file_not_produced_by_a_prior_split(self):
+        # Le fichier deja present sur disque n'a meme pas besoin de venir
+        # d'une precedente division : n'importe quel fichier de meme nom
+        # (deplace la, cree manuellement...) doit etre respecte.
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=3)
+        out_dir = self.tmp / "split"
+        out_dir.mkdir()
+        pre_existing = out_dir / "doc_01_p1-2.pdf"
+        pre_existing.write_bytes(b"contenu preexistant, ne doit jamais etre efface")
+
+        paths = ops.split_pdf_by_ranges(pdf, [(1, 2)], out_dir, "doc")
+        self.assertEqual(len(paths), 1)
+        self.assertNotEqual(paths[0], pre_existing)
+        self.assertEqual(pre_existing.read_bytes(), b"contenu preexistant, ne doit jamais etre efface")
+
     def test_reorder_and_filter_pages_reverses_and_drops_a_page(self):
         pdf = make_pdf(self.tmp / "doc.pdf", num_pages=3, labels=["P1", "P2", "P3"])
         output = self.tmp / "reordered.pdf"
@@ -254,6 +288,46 @@ class PdfOpsTestCase(unittest.TestCase):
     def test_images_to_pdf_rejects_empty_list(self):
         with self.assertRaises(ops.PdfOpsError):
             ops.images_to_pdf([], self.tmp / "out.pdf")
+
+    def test_pdf_to_images_avoids_overwriting_pre_existing_files_on_disk(self):
+        # Meme classe de regression que pour split_pdf_by_ranges : relancer
+        # une conversion PDF->images vers le meme dossier ecrasait
+        # silencieusement les images de la fois precedente.
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=2)
+        out_dir = self.tmp / "images"
+        first = ops.pdf_to_images(pdf, out_dir, "doc", dpi=72, fmt="png")
+        second = ops.pdf_to_images(pdf, out_dir, "doc", dpi=72, fmt="png")
+
+        self.assertEqual(len(first), 2)
+        self.assertEqual(len(second), 2)
+        self.assertEqual(len(set(first) | set(second)), 4)
+        for p in first + second:
+            self.assertTrue(p.exists())
+
+    def test_pdf_to_images_respects_jpeg_quality(self):
+        # Une image bruitee (haute entropie) pour que la qualite JPEG ait un
+        # effet mesurable sur la taille du fichier - contrairement a une
+        # page vide qui se compresserait deja au minimum quelle que soit la
+        # qualite demandee.
+        import os
+        image_path = self.tmp / "photo.png"
+        size = (300, 300)
+        Image.frombytes("RGB", size, os.urandom(size[0] * size[1] * 3)).save(image_path)
+        pdf = make_pdf_with_image(self.tmp / "with_image.pdf", image_path)
+
+        low_quality = ops.pdf_to_images(pdf, self.tmp / "low", "doc", dpi=100, fmt="jpg", quality=5)
+        high_quality = ops.pdf_to_images(pdf, self.tmp / "high", "doc", dpi=100, fmt="jpg", quality=95)
+
+        self.assertLess(low_quality[0].stat().st_size, high_quality[0].stat().st_size)
+
+    def test_pdf_to_images_reports_progress_per_page(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=3)
+        calls = []
+        ops.pdf_to_images(
+            pdf, self.tmp / "images", "doc", dpi=72, fmt="png",
+            progress_callback=lambda done, total: calls.append((done, total)),
+        )
+        self.assertEqual(calls, [(1, 3), (2, 3), (3, 3)])
 
     def test_extract_embedded_images_recovers_the_embedded_photo(self):
         source_image = self.tmp / "photo.png"
