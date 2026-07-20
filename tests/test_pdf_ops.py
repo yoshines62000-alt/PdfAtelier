@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import DictionaryObject, NameObject, NumberObject, StreamObject
+from pypdf.generic import DictionaryObject, IndirectObject, NameObject, NumberObject, StreamObject
 from PIL import Image
 from reportlab.pdfgen import canvas
 
@@ -490,7 +490,28 @@ class PdfOpsTestCase(unittest.TestCase):
         with self.assertRaises(ops.PdfOpsError):
             ops.set_metadata(protected, self.tmp / "out.pdf", {"title": "X"})
         ops.set_metadata(protected, self.tmp / "out.pdf", {"title": "X"}, password="secret")
-        self.assertEqual(ops.read_metadata(self.tmp / "out.pdf")["title"], "X")
+        self.assertEqual(ops.read_metadata(self.tmp / "out.pdf", password="secret")["title"], "X")
+
+    def test_set_metadata_preserves_password_protection_of_an_encrypted_source(self):
+        # Regression trouvee a l'audit : editer/purger les metadonnees d'un
+        # PDF protege produisait silencieusement une copie NON protegee (le
+        # motif "nouveau writer, jamais reader.metadata" qui protege contre
+        # la fuite de metadonnees faisait aussi disparaitre le chiffrement).
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1, labels=["Confidentiel"])
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+
+        output = self.tmp / "out.pdf"
+        ops.set_metadata(protected, output, {"title": "X"}, password="secret")
+        self.assertTrue(PdfReader(str(output)).is_encrypted)
+        with self.assertRaises(ops.PdfOpsError):
+            ops.extract_text(output)  # sans mot de passe : toujours refuse
+        self.assertIn("Confidentiel", ops.extract_text(output, password="secret")[0])
+
+        # Meme garantie pour la purge (dict vide).
+        purged = self.tmp / "purge.pdf"
+        ops.set_metadata(protected, purged, {}, password="secret")
+        self.assertTrue(PdfReader(str(purged)).is_encrypted)
 
     # -- pieces jointes -------------------------------------------------------------
 
@@ -547,6 +568,34 @@ class PdfOpsTestCase(unittest.TestCase):
             ops.extract_attachments(protected, self.tmp / "out")
         # Le mot de passe correct fonctionne (aucune piece jointe dans ce fichier).
         self.assertEqual(ops.extract_attachments(protected, self.tmp / "out", password="secret"), [])
+
+    def test_extract_attachments_a_corrupt_attachment_never_aborts_extraction_of_the_others(self):
+        # Regression trouvee a l'audit : reader.attachments est un dict
+        # paresseux (pypdf LazyDict) qui decode le contenu d'une piece
+        # jointe au moment de l'ACCES, pas de l'iteration des cles - iterer
+        # via .items() decodait donc "bad.bin" pendant la boucle elle-meme,
+        # avant tout try/except, et une reference /EF /F cassee (courante
+        # sur un PDF malforme/tronque) faisait planter l'extraction de
+        # TOUTES les pieces jointes, y compris "good.txt" qui la precede.
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        writer.add_attachment("good.txt", b"contenu valide")
+        writer.add_attachment("bad.bin", b"sera corrompu")
+
+        names = writer._root_object["/Names"]["/EmbeddedFiles"]["/Names"]
+        filespec = names[names.index("bad.bin") + 1].get_object()
+        filespec["/EF"][NameObject("/F")] = IndirectObject(99999, 0, writer)  # reference vers un objet inexistant
+
+        pdf = self.tmp / "avec_pj_corrompue.pdf"
+        with open(pdf, "wb") as f:
+            writer.write(f)
+
+        extracted = ops.extract_attachments(pdf, self.tmp / "out")
+        names_extracted = {p.name for p in extracted}
+        self.assertIn("good.txt", names_extracted)
+        self.assertNotIn("bad.bin", names_extracted)
+        good_path = next(p for p in extracted if p.name == "good.txt")
+        self.assertEqual(good_path.read_bytes(), b"contenu valide")
 
 
 if __name__ == "__main__":

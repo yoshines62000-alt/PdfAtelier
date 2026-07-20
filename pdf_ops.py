@@ -374,7 +374,15 @@ def set_metadata(
     eventuel de la source ne sont jamais copies vers la sortie, purge ou
     non - seul un appel explicite a add_metadata() en reintroduit. Le
     /Producer devient "pypdf" a l'ecriture (comportement de la
-    bibliotheque) : la purge ne peut pas l'effacer, seulement le remplacer."""
+    bibliotheque) : la purge ne peut pas l'effacer, seulement le remplacer.
+
+    Si la source etait protegee par mot de passe, la sortie l'est A
+    NOUVEAU avec ce meme mot de passe : sans cela, editer/purger les
+    metadonnees d'un PDF confidentiel produirait silencieusement une copie
+    NON protegee (regression de confidentialite trouvee a l'audit - le
+    motif "nouveau writer, jamais reader.metadata" qui protege bien contre
+    la fuite de metadonnees fait aussi disparaitre le chiffrement,
+    puisqu'un writer neuf n'est jamais chiffre par defaut)."""
     reader = _open_reader(input_path, password=password)
     writer = PdfWriter()
     for page in reader.pages:
@@ -385,6 +393,8 @@ def set_metadata(
     }
     if non_empty:
         writer.add_metadata(non_empty)
+    if reader.is_encrypted:
+        writer.encrypt(password, password)
     _write_output(writer, output_path)
 
 
@@ -430,25 +440,50 @@ def extract_attachments(input_path: Path, output_dir: Path, password: Optional[s
     donnee non fiable : Path(name).name neutralise toute tentative de
     traversee de repertoire ou de separateur (ex: "..\\evil.txt" devient
     "evil.txt", toujours ecrit A L'INTERIEUR de output_dir), et un nom vide
-    apres nettoyage retombe sur un nom generique plutot que d'echouer."""
+    apres nettoyage retombe sur un nom generique plutot que d'echouer.
+
+    Une piece jointe individuelle corrompue/malformee (reference indirecte
+    invalide dans le PDF, flux tronque...) est ignoree plutot que de faire
+    echouer toute l'extraction - meme philosophie que extract_embedded_images.
+    C'est indispensable ici, pas juste une precaution : reader.attachments
+    est un dict paresseux (pypdf LazyDict) dont l'iteration sur `.keys()`
+    ne decode rien, mais chaque acces reader.attachments[nom] declenche
+    reellement la resolution du contenu - une piece jointe malformee y leve
+    une exception (AttributeError constate a l'audit sur une reference
+    /EF indirecte cassee, mais d'autres types sont plausibles vu la
+    variete de structures PDF malformees possibles)."""
     reader = _open_reader(input_path, password=password)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_paths = []
     used_paths = set()
-    for raw_name, contents_list in reader.attachments.items():
+    # Iterer sur .keys() (jamais .items()) : .items() decoderait le
+    # contenu DE CHAQUE piece jointe pendant l'iteration elle-meme, avant
+    # meme d'atteindre le try/except ci-dessous - abandonnant alors toute
+    # l'extraction des la premiere piece jointe corrompue rencontree, y
+    # compris celles qui suivent et sont parfaitement saines (meme classe
+    # de bug que le `try` place une ligne trop tard, deja corrige une fois
+    # dans extract_embedded_images).
+    for raw_name in reader.attachments.keys():
+        try:
+            contents_list = reader.attachments[raw_name]
+        except (OSError, ValueError, KeyError, AttributeError, TypeError):
+            continue
         safe_name = Path(str(raw_name)).name.strip() or "piece_jointe"
         stem = Path(safe_name).stem or "piece_jointe"
         suffix = Path(safe_name).suffix
         for contents in contents_list:
-            output_path = output_dir / safe_name
-            counter = 1
-            while output_path.exists() or output_path in used_paths:
-                output_path = output_dir / f"{stem} ({counter}){suffix}"
-                counter += 1
-            used_paths.add(output_path)
-            output_path.write_bytes(contents)
-            output_paths.append(output_path)
+            try:
+                output_path = output_dir / safe_name
+                counter = 1
+                while output_path.exists() or output_path in used_paths:
+                    output_path = output_dir / f"{stem} ({counter}){suffix}"
+                    counter += 1
+                used_paths.add(output_path)
+                output_path.write_bytes(contents)
+                output_paths.append(output_path)
+            except (OSError, ValueError, TypeError):
+                continue
     return output_paths
 
 
