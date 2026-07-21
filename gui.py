@@ -457,7 +457,7 @@ class PdfAtelierApp:
                 lines.append(f"  - {source.name} : {message}")
         messagebox.showinfo(APP_TITLE, "\n".join(lines))
 
-    def _run_in_background_with_progress(self, work, on_done):
+    def _run_in_background_with_progress(self, work, on_done, indeterminate=False):
         """Execute `work(report)` dans un thread separe pendant qu'une
         fenetre modale affiche une barre de progression, pour ne jamais
         geler l'interface le temps d'un traitement en lot ou d'une
@@ -477,7 +477,13 @@ class PdfAtelierApp:
         `on_done(resultat, erreur)` est appele sur le THREAD PRINCIPAL (via
         root.after, comme le reste de l'UI) une fois le travail termine :
         `erreur` est l'exception levee par `work` le cas echeant (None sinon),
-        `resultat` est sa valeur de retour (None en cas d'erreur)."""
+        `resultat` est sa valeur de retour (None en cas d'erreur).
+
+        `indeterminate=True` bascule la barre de progression en mode animation
+        continue plutot qu'en pourcentage : utilise pour les traitements
+        fichier unique (Fusionner, Diviser, Pages, Proprietes) qui n'ont pas
+        de granularite naturelle (contrairement au traitement par lot, dont
+        la progression avance fichier par fichier via `report`)."""
         message_queue: "queue.Queue" = queue.Queue()
 
         dialog = Toplevel(self.root)
@@ -487,8 +493,12 @@ class PdfAtelierApp:
         dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # pas de fermeture manuelle en cours de traitement
         ttk.Label(dialog, text="Traitement en cours...").pack(padx=20, pady=(15, 5))
         status_var = StringVar(value="")
-        progress_bar = ttk.Progressbar(dialog, orient=HORIZONTAL, mode="determinate", length=320)
+        progress_bar = ttk.Progressbar(
+            dialog, orient=HORIZONTAL, mode="indeterminate" if indeterminate else "determinate", length=320,
+        )
         progress_bar.pack(padx=20, pady=5)
+        if indeterminate:
+            progress_bar.start(15)
         ttk.Label(dialog, textvariable=status_var, foreground="#666").pack(padx=20, pady=(0, 15))
         dialog.update_idletasks()
         try:
@@ -516,9 +526,12 @@ class PdfAtelierApp:
                 while True:
                     kind, done, total, message = message_queue.get_nowait()
                     if kind == "progress":
-                        progress_bar.configure(value=done, maximum=max(total, 1))
+                        if not indeterminate:
+                            progress_bar.configure(value=done, maximum=max(total, 1))
                         status_var.set(message or f"{done} / {total}")
                     elif kind == "done":
+                        if indeterminate:
+                            progress_bar.stop()
                         try:
                             dialog.grab_release()
                         except Exception:
@@ -551,6 +564,44 @@ class PdfAtelierApp:
             self._show_batch_summary(successes, failures, verb)
 
         self._run_in_background_with_progress(work, on_done)
+
+    def _run_safely_in_background(self, action, on_success=None, success_message=None):
+        """Equivalent fichier-unique de `_run_batch_with_progress` : execute
+        `action` (sans argument) dans un thread separe avec fenetre de
+        progression indeterminee, plutot que sur le thread principal Tk.
+        Remplace l'usage synchrone de `_run_safely` pour Fusionner, Diviser,
+        Pages et Proprietes - un filigrane sur un PDF de 3000 pages gelait
+        l'UI pendant 32.7s en synchrone (mesure a l'audit), et ces quatre
+        onglets appellent des operations tout aussi couteuses sur un fichier
+        unique (fusion/division/reorganisation/metadonnees de gros PDF).
+
+        Comme pour `_run_safely`, toute lecture de champ Tkinter (IntVar.get(),
+        etc.) necessaire a `action` doit se faire par l'appelant AVANT cet
+        appel : `action` s'execute ici sur le thread worker, qui ne doit
+        JAMAIS toucher a un widget/variable Tkinter (non thread-safe).
+
+        `on_success(resultat)`, si fourni, est appele sur le thread principal
+        uniquement si `action` a reussi (memes categories d'erreur que
+        `_run_safely` : PdfOpsError -> avertissement, autre exception ->
+        erreur inattendue, silencieusement affichees puis on_success jamais
+        appele). `success_message`, si fourni, est affiche apres on_success."""
+
+        def work(report):
+            return action()
+
+        def on_done(result, error):
+            if error is not None:
+                if isinstance(error, ops.PdfOpsError):
+                    messagebox.showwarning(APP_TITLE, str(error))
+                else:
+                    messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
+                return
+            if on_success:
+                on_success(result)
+            if success_message:
+                messagebox.showinfo(APP_TITLE, success_message)
+
+        self._run_in_background_with_progress(work, on_done, indeterminate=True)
 
     # -- onglet Fusionner -------------------------------------------------------
 
@@ -639,9 +690,9 @@ class PdfAtelierApp:
         if not self._warn_if_output_overwrites_source(self.merge_files, output):
             return
         passwords = [self.merge_passwords.get(self._resolve(path)) for path in self.merge_files]
-        self._run_safely(
+        self._run_safely_in_background(
             lambda: ops.merge_pdfs(self.merge_files, output, passwords=passwords),
-            f"PDF fusionne enregistre : {output.name}",
+            success_message=f"PDF fusionne enregistre : {output.name}",
         )
 
     # -- onglet Diviser ---------------------------------------------------------
@@ -783,26 +834,34 @@ class PdfAtelierApp:
         if not output_dir:
             return
         base_name = self.split_source_path.stem
+        password = self.split_source_password
+        # Toutes les variables Tkinter sont lues ICI, sur le thread
+        # principal, avant de lancer le traitement en arriere-plan :
+        # `action` ci-dessous s'execute sur un thread worker, qui ne doit
+        # jamais toucher a un widget/variable Tkinter (non thread-safe).
+        mode = self.split_mode_var.get()
+        ranges_text = self.split_ranges_var.get()
+        every_n_text = self.split_every_n_var.get()
 
         def action():
-            password = self.split_source_password
-            if self.split_mode_var.get() == "ranges":
+            if mode == "ranges":
                 page_count = ops.get_page_count(self.split_source_path, password=password)
                 try:
-                    ranges = self._parse_ranges(self.split_ranges_var.get(), page_count)
+                    ranges = self._parse_ranges(ranges_text, page_count)
                 except ValueError:
                     raise ops.PdfOpsError("Format de plages invalide. Exemple attendu : 1-3,5,7-9")
                 return ops.split_pdf_by_ranges(self.split_source_path, ranges, output_dir, base_name, password=password)
             else:
                 try:
-                    n = int(self.split_every_n_var.get())
+                    n = int(every_n_text)
                 except ValueError:
                     raise ops.PdfOpsError("Le nombre de pages par fichier doit etre un entier.")
                 return ops.split_pdf_every_n_pages(self.split_source_path, n, output_dir, base_name, password=password)
 
-        result = self._run_safely(action)
-        if result is not None:
+        def on_success(result):
             messagebox.showinfo(APP_TITLE, f"{len(result)} fichier(s) genere(s) dans {output_dir}")
+
+        self._run_safely_in_background(action, on_success)
 
     # -- onglet Pages (reorganiser / pivoter / supprimer) ------------------------
 
@@ -953,11 +1012,11 @@ class PdfAtelierApp:
             return
         page_order = [entry["page"] for entry in self.page_state]
         rotations = {entry["page"]: entry["rotation"] for entry in self.page_state if entry["rotation"]}
-        self._run_safely(
+        self._run_safely_in_background(
             lambda: ops.reorder_and_filter_pages(
                 self.pages_source_path, output, page_order, rotations, password=self.pages_source_password
             ),
-            f"Document enregistre : {output.name}",
+            success_message=f"Document enregistre : {output.name}",
         )
 
     # -- onglet Compresser --------------------------------------------------------
@@ -1025,28 +1084,6 @@ class PdfAtelierApp:
             max_dim = self.compress_max_dim_var.get()
         except Exception as exc:
             messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
-            return
-
-        if len(pairs) == 1:
-            source, output = pairs[0]
-            result = self._run_safely(
-                lambda: ops.compress_pdf(
-                    source, output, image_quality=quality, max_dimension=max_dim,
-                    password=self.compress_passwords.get(self._resolve(source)),
-                )
-            )
-            if result is not None:
-                summary = (
-                    f"{_format_size(result.original_size)} -> {_format_size(result.compressed_size)} "
-                    f"({result.ratio_percent:g} % de reduction)"
-                )
-                if result.images_failed:
-                    summary += (
-                        f" - {result.images_failed}/{result.images_total} image(s) n'ont pas pu etre "
-                        "recompressees (format non supporte) et ont ete conservees telles quelles"
-                    )
-                self.compress_result_var.set(summary)
-                messagebox.showinfo(APP_TITLE, f"PDF compresse enregistre : {output.name}")
             return
 
         def work(report):
@@ -1407,11 +1444,6 @@ class PdfAtelierApp:
                 password=self.watermark_passwords.get(self._resolve(source)),
             )
 
-        if len(pairs) == 1:
-            source, output = pairs[0]
-            self._run_safely(lambda: make_action(source, output), f"Filigrane applique : {output.name}")
-            return
-
         self._run_batch_with_progress(pairs, make_action, "traite(s) (filigrane applique)")
 
     # -- onglet Numeroter ---------------------------------------------------------------
@@ -1505,11 +1537,6 @@ class PdfAtelierApp:
                 source, output, position=position, start_at=start_at, font_size=font_size, fmt=fmt,
                 password=self.page_numbers_passwords.get(self._resolve(source)),
             )
-
-        if len(pairs) == 1:
-            source, output = pairs[0]
-            self._run_safely(lambda: make_action(source, output), f"Pages numerotees : {output.name}")
-            return
 
         self._run_batch_with_progress(pairs, make_action, "traite(s) (pages numerotees)")
 
@@ -1638,19 +1665,12 @@ class PdfAtelierApp:
                 source, output, new_password, password=self.protect_current_passwords.get(self._resolve(source)),
             )
             success_verb = "protege(s)"
-            single_message = lambda output: f"PDF protege enregistre : {output.name}"
         else:
             pairs = self._resolve_batch_outputs(self.protect_sources, "sans_mot_de_passe.pdf", "_sans_mot_de_passe")
             if pairs is None:
                 return
             make_action = lambda source, output: ops.remove_password(source, output, new_password)
             success_verb = "deprotege(s)"
-            single_message = lambda output: f"Protection retiree : {output.name}"
-
-        if len(pairs) == 1:
-            source, output = pairs[0]
-            self._run_safely(lambda: make_action(source, output), single_message(output))
-            return
 
         self._run_batch_with_progress(pairs, make_action, success_verb)
 
@@ -1860,11 +1880,11 @@ class PdfAtelierApp:
         if not self._warn_if_output_overwrites_source(self.properties_source_path, output):
             return
         metadata = self._properties_fields()
-        self._run_safely(
+        self._run_safely_in_background(
             lambda: ops.set_metadata(
                 self.properties_source_path, output, metadata, password=self.properties_source_password,
             ),
-            f"Proprietes enregistrees : {output.name}",
+            success_message=f"Proprietes enregistrees : {output.name}",
         )
 
     def _properties_purge(self):
@@ -1882,21 +1902,23 @@ class PdfAtelierApp:
             return
         def purge_action():
             # set_metadata ne renvoie rien (None) meme en cas de succes -
-            # `_run_safely` distingue echec/succes via son retour (None =
-            # exception capturee), ce qui serait ambigu avec une action dont
-            # le succes renvoie aussi None. On renvoie donc explicitement
-            # True pour que le nettoyage des champs ci-dessous ne s'execute
-            # QUE si la purge a reellement reussi (bug trouve en testant : le
-            # nettoyage ne se declenchait jamais, meme apres une purge reussie).
+            # `_run_safely_in_background` ne declenche `on_success` QUE si
+            # `action` n'a pas leve d'exception (contrairement a `_run_safely`,
+            # dont l'appelant devait jusqu'ici distinguer echec/succes via un
+            # retour None ambigu avec un succes qui renvoie lui aussi None -
+            # bug trouve en testant : le nettoyage des champs ci-dessous ne se
+            # declenchait jamais, meme apres une purge reussie).
             ops.set_metadata(self.properties_source_path, output, {}, password=self.properties_source_password)
-            return True
 
-        result = self._run_safely(purge_action, f"Metadonnees purgees : {output.name}")
-        if result:
+        def on_success(_result):
             self.properties_title_var.set("")
             self.properties_author_var.set("")
             self.properties_subject_var.set("")
             self.properties_keywords_var.set("")
+
+        self._run_safely_in_background(
+            purge_action, on_success, success_message=f"Metadonnees purgees : {output.name}",
+        )
 
 
 def ttk_listbox(parent, height=12, selectmode="browse"):
