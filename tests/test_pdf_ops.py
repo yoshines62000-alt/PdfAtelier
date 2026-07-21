@@ -329,6 +329,35 @@ class PdfOpsTestCase(unittest.TestCase):
         )
         self.assertEqual(calls, [(1, 3), (2, 3), (3, 3)])
 
+    def test_pdf_to_images_works_on_a_password_protected_pdf_with_correct_password(self):
+        # Bug trouve a l'audit : pdf_to_images ouvrait le PDF via pdfium sans
+        # jamais transmettre de mot de passe, faisant echouer toute
+        # conversion d'un PDF protege meme avec le bon mot de passe.
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=2)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+
+        image_paths = ops.pdf_to_images(protected, self.tmp / "images", "doc", dpi=72, fmt="png", password="secret")
+        self.assertEqual(len(image_paths), 2)
+        for p in image_paths:
+            self.assertTrue(p.exists())
+
+    def test_pdf_to_images_raises_clear_error_without_password(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+
+        with self.assertRaises(ops.PdfOpsError):
+            ops.pdf_to_images(protected, self.tmp / "images", "doc", dpi=72, fmt="png")
+
+    def test_pdf_to_images_raises_clear_error_with_wrong_password(self):
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+
+        with self.assertRaises(ops.PdfOpsError):
+            ops.pdf_to_images(protected, self.tmp / "images", "doc", dpi=72, fmt="png", password="wrong")
+
     def test_extract_embedded_images_recovers_the_embedded_photo(self):
         source_image = self.tmp / "photo.png"
         Image.new("RGB", (40, 30), color=(10, 20, 30)).save(source_image)

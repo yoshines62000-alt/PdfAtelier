@@ -229,9 +229,16 @@ def compress_pdf(
 
 def pdf_to_images(
     input_path: Path, output_dir: Path, base_name: str, dpi: int = 150, fmt: str = "png",
-    quality: int = 90, progress_callback: Optional[callable] = None,
+    quality: int = 90, progress_callback: Optional[callable] = None, password: str = "",
 ) -> list:
-    """quality : qualite JPEG (1 = tres compresse, 95 = quasi sans perte),
+    """password : mot de passe du PDF source, s'il est protege - pdfium (a la
+    difference de pypdf/_open_reader utilise par le reste du module) leve une
+    PdfiumError technique brute si le mot de passe manque ou est incorrect ;
+    on la convertit ici en PdfOpsError avec un message clair (bug trouve a
+    l'audit : la conversion echouait avec une erreur technique non traduite,
+    sans indiquer qu'un mot de passe etait necessaire).
+
+    quality : qualite JPEG (1 = tres compresse, 95 = quasi sans perte),
     utilisee uniquement quand `fmt` est "jpg"/"jpeg" (ignoree par Pillow pour
     le PNG, format sans perte). progress_callback(done, total), si fourni,
     est appele apres chaque page rendue - utilise par le GUI pour afficher
@@ -249,7 +256,14 @@ def pdf_to_images(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     scale = dpi / 72.0
-    pdf = pdfium.PdfDocument(str(input_path))
+    try:
+        pdf = pdfium.PdfDocument(str(input_path), password=password or None)
+    except pdfium.PdfiumError as exc:
+        if "password" in str(exc).lower():
+            if password:
+                raise PdfOpsError(f"Mot de passe incorrect pour {Path(input_path).name}.") from exc
+            raise PdfOpsError(f"Le fichier {Path(input_path).name} est protege par un mot de passe.") from exc
+        raise
     output_paths = []
     used_paths = set()
     try:

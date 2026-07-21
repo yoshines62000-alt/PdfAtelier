@@ -1104,6 +1104,7 @@ class PdfAtelierApp:
         pdf_to_img.pack(fill=X, padx=10, pady=10)
         self.p2i_source_path = None
         self.p2i_source_var = StringVar(value="Aucun fichier choisi")
+        self.p2i_password_var = StringVar()
         self.p2i_dpi_var = IntVar(value=150)
         self.p2i_format_var = StringVar(value="png")
         # Qualite JPEG reglable (ignoree pour le PNG, format sans perte) -
@@ -1116,6 +1117,8 @@ class PdfAtelierApp:
         top.pack(fill=X, padx=5, pady=5)
         ttk.Button(top, text="Choisir un PDF...", command=self._p2i_pick_source).pack(side=LEFT)
         ttk.Label(top, textvariable=self.p2i_source_var).pack(side=LEFT, padx=10)
+        ttk.Label(top, text="Mot de passe (si protege)").pack(side=LEFT, padx=(15, 0))
+        ttk.Entry(top, textvariable=self.p2i_password_var, show="*", width=16).pack(side=LEFT, padx=5)
 
         options = ttk.Frame(pdf_to_img)
         options.pack(fill=X, padx=5, pady=5)
@@ -1220,6 +1223,7 @@ class PdfAtelierApp:
         except Exception as exc:
             messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
             return
+        password = self.p2i_password_var.get() or ""
 
         # La conversion PDF->images peut prendre du temps sur un document de
         # nombreuses pages/haute resolution : execute dans un thread separe
@@ -1232,7 +1236,7 @@ class PdfAtelierApp:
 
             return ops.pdf_to_images(
                 self.p2i_source_path, output_dir, base_name, dpi=dpi, fmt=fmt, quality=quality,
-                progress_callback=progress_cb,
+                progress_callback=progress_cb, password=password,
             )
 
         def on_done(result, error):
