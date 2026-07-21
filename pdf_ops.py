@@ -461,7 +461,7 @@ def set_password(
     writer = PdfWriter()
     for page in reader.pages:
         writer.add_page(page)
-    writer.encrypt(user_password, owner_password or user_password)
+    writer.encrypt(user_password, owner_password or user_password, algorithm="AES-256")
     _write_output(writer, output_path)
 
 

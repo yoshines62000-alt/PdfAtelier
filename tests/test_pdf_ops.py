@@ -478,6 +478,53 @@ class PdfOpsTestCase(unittest.TestCase):
         self.assertFalse(reader2.is_encrypted)
         self.assertIn("Secret", ops.extract_text(unprotected)[0])
 
+    def test_set_password_uses_aes_256_not_rc4(self):
+        """L'algorithme de chiffrement doit etre AES-256 (V=5, R=6, Length=256)
+        et non le RC4-128 par defaut de pypdf (V=2, R=3, Length=128) - RC4 se
+        casse avec des outils grand public (John the Ripper, hashcat)."""
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1, labels=["Secret"])
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="hunter2")
+
+        reader = PdfReader(str(protected))
+        self.assertTrue(reader.is_encrypted)
+        encrypt_dict = reader.trailer["/Encrypt"].get_object()
+        self.assertEqual(int(encrypt_dict["/V"]), 5)
+        self.assertEqual(int(encrypt_dict["/R"]), 6)
+        self.assertEqual(int(encrypt_dict["/Length"]), 256)
+        self.assertEqual(str(encrypt_dict["/Filter"]), "/Standard")
+
+        # Le fichier reste pleinement exploitable par les fonctions du
+        # projet une fois dechiffre (pas de regression de lecture AES-256).
+        self.assertEqual(ops.get_page_count(protected, password="hunter2"), 1)
+        self.assertIn("Secret", ops.extract_text(protected, password="hunter2")[0])
+
+    def test_set_password_reprotects_an_already_protected_pdf(self):
+        """L'onglet Protection permet de re-proteger un PDF deja protege
+        (nouveau mot de passe) - `password=` est l'ancien mot de passe du
+        fichier source, les deux nouveaux sont ceux passes en argument
+        positionnel/owner_password. Le resultat doit lui aussi etre en
+        AES-256."""
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1, labels=["Secret"])
+        first = self.tmp / "first.pdf"
+        ops.set_password(pdf, first, user_password="ancien-mdp")
+
+        second = self.tmp / "second.pdf"
+        ops.set_password(first, second, user_password="nouveau-mdp", password="ancien-mdp")
+
+        reader = PdfReader(str(second))
+        self.assertTrue(reader.is_encrypted)
+        encrypt_dict = reader.trailer["/Encrypt"].get_object()
+        self.assertEqual(int(encrypt_dict["/V"]), 5)
+        self.assertEqual(int(encrypt_dict["/R"]), 6)
+        self.assertEqual(int(encrypt_dict["/Length"]), 256)
+
+        # L'ancien mot de passe ne doit plus fonctionner, seul le nouveau.
+        with self.assertRaises(ops.PdfOpsError):
+            ops.get_page_count(second, password="ancien-mdp")
+        self.assertEqual(ops.get_page_count(second, password="nouveau-mdp"), 1)
+        self.assertIn("Secret", ops.extract_text(second, password="nouveau-mdp")[0])
+
     def test_remove_password_rejects_wrong_password(self):
         pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
         protected = self.tmp / "protected.pdf"
