@@ -1099,6 +1099,56 @@ class PdfOpsTestCase(unittest.TestCase):
         self.assertEqual(len(pypdf_lines), 1)
         self.assertIn("<7.0", pypdf_lines[0])
 
+    # -- validation des champs numeriques (point 14 de l'audit) --------------------
+
+    def test_pdf_to_images_rejects_a_zero_dpi_with_a_clear_error(self):
+        # Regression trouvee a l'audit : un DPI a 0 (faute de frappe
+        # plausible) laissait auparavant remonter une exception technique
+        # brute de pdfium/Pillow ("ValueError: Crop exceeds page
+        # dimensions") au lieu d'un message comprehensible.
+        pdf = make_pdf(self.tmp / "a.pdf", num_pages=1)
+        with self.assertRaises(ops.PdfOpsError) as ctx:
+            ops.pdf_to_images(pdf, self.tmp / "images", "a", dpi=0)
+        self.assertIn("resolution", str(ctx.exception).lower())
+
+    def test_pdf_to_images_rejects_a_negative_dpi_with_a_clear_error(self):
+        pdf = make_pdf(self.tmp / "a.pdf", num_pages=1)
+        with self.assertRaises(ops.PdfOpsError) as ctx:
+            ops.pdf_to_images(pdf, self.tmp / "images", "a", dpi=-50)
+        self.assertIn("resolution", str(ctx.exception).lower())
+
+    def test_compress_pdf_rejects_a_zero_or_negative_max_dimension(self):
+        image_path = self.tmp / "photo.png"
+        Image.new("RGB", (50, 50), color=(10, 20, 30)).save(image_path)
+        pdf = make_pdf_with_image(self.tmp / "with_image.pdf", image_path)
+        for max_dimension in (0, -100):
+            with self.assertRaises(ops.PdfOpsError) as ctx:
+                ops.compress_pdf(pdf, self.tmp / "out.pdf", image_quality=60, max_dimension=max_dimension)
+            self.assertIn("dimension", str(ctx.exception).lower())
+
+    def test_compress_pdf_rejects_an_out_of_range_image_quality(self):
+        image_path = self.tmp / "photo.png"
+        Image.new("RGB", (50, 50), color=(10, 20, 30)).save(image_path)
+        pdf = make_pdf_with_image(self.tmp / "with_image.pdf", image_path)
+        for image_quality in (0, -10, 101):
+            with self.assertRaises(ops.PdfOpsError) as ctx:
+                ops.compress_pdf(pdf, self.tmp / "out.pdf", image_quality=image_quality, max_dimension=1600)
+            self.assertIn("qualite", str(ctx.exception).lower())
+
+    def test_add_text_watermark_rejects_a_zero_or_negative_font_size(self):
+        pdf = make_pdf(self.tmp / "a.pdf", num_pages=1)
+        for font_size in (0, -5):
+            with self.assertRaises(ops.PdfOpsError) as ctx:
+                ops.add_text_watermark(pdf, self.tmp / "out.pdf", "CONFIDENTIEL", font_size=font_size)
+            self.assertIn("police", str(ctx.exception).lower())
+
+    def test_add_page_numbers_rejects_a_zero_or_negative_font_size(self):
+        pdf = make_pdf(self.tmp / "a.pdf", num_pages=1)
+        for font_size in (0, -5):
+            with self.assertRaises(ops.PdfOpsError) as ctx:
+                ops.add_page_numbers(pdf, self.tmp / "out.pdf", font_size=font_size)
+            self.assertIn("police", str(ctx.exception).lower())
+
 
 if __name__ == "__main__":
     unittest.main()

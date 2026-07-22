@@ -5,6 +5,7 @@ envoye a un service en ligne."""
 
 from __future__ import annotations
 
+import ctypes
 import queue
 import sys
 import threading
@@ -40,6 +41,63 @@ def _format_size(num_bytes: int) -> str:
             return f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} Go"
+
+
+_dpi_awareness_configured = False
+
+
+def _configure_dpi_awareness() -> None:
+    """Rend le processus explicitement "Per-Monitor V2 DPI Aware" AVANT
+    toute creation de fenetre Tk (audit, dimension 18) : sans manifeste ni
+    appel explicite, un executable PyInstaller n'est, par defaut, PAS
+    declare sensible au DPI - Windows le traite alors comme "DPI-unaware" et
+    applique un lissage bitmap a toute l'application des qu'un facteur
+    d'echelle superieur a 100% est actif (125%/150%/200%, tres courant sur
+    portables/ecrans modernes), produisant un rendu visiblement flou du
+    texte et des icones.
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4) est disponible depuis
+    Windows 10 1703 ; repli sur les API plus anciennes (Windows 8.1 puis
+    Vista) pour rester fonctionnel sur un systeme plus ancien.
+    Complementaire du manifeste embarque dans l'executable PyInstaller
+    (PdfAtelier.manifest, reference par PdfAtelier.spec) qui couvre le meme
+    besoin AVANT meme que Python ne demarre - le manifeste est la methode
+    recommandee par Microsoft pour un executable natif ; cet appel ctypes
+    reste un filet de securite actif meme lance depuis le code source
+    (`python gui.py`, sans passer par l'exe empaquete). Meme pattern deja
+    applique et verifie sur les projets GuideExpress et Enveloppe.
+    Idempotent (protege par `_dpi_awareness_configured`) : applique au
+    moment de l'import du module, avant que main() ou un test ne puisse
+    construire la premiere fenetre Tk() - un appel APRES la creation de la
+    premiere fenetre Tk n'aurait aucun effet (la sensibilite DPI d'un
+    processus Windows ne peut etre definie qu'une seule fois, avant toute
+    fenetre)."""
+    global _dpi_awareness_configured
+    if _dpi_awareness_configured or sys.platform != "win32":
+        return
+    try:
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+            _dpi_awareness_configured = True
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        PROCESS_PER_MONITOR_DPI_AWARE = 2
+        if ctypes.windll.shcore.SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) == 0:
+            _dpi_awareness_configured = True
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass  # echec silencieux : au pire, comportement pre-correctif (non DPI-aware) - jamais bloquant pour le reste de l'app
+    _dpi_awareness_configured = True
+
+
+# Applique au moment de l'import du module, avant que __main__ ou un test ne
+# construise la premiere fenetre Tk() - voir la docstring de la fonction.
+_configure_dpi_awareness()
 
 
 class PdfAtelierApp:
@@ -1267,6 +1325,15 @@ class PdfAtelierApp:
             dpi = self.p2i_dpi_var.get()
             fmt = self.p2i_format_var.get()
             quality = self.p2i_quality_var.get()
+            # Un DPI a 0 ou negatif (faute de frappe plausible) n'est pas
+            # une erreur Tcl (le champ reste un entier valide) : sans cette
+            # verification explicite, l'echec ne survenait qu'une fois le
+            # traitement lance en arriere-plan, avec l'ouverture inutile de
+            # la fenetre de progression avant l'erreur (bug trouve a
+            # l'audit - ops.pdf_to_images() valide aussi le DPI, ce controle
+            # ici n'est qu'un raccourci pour un retour immediat).
+            if dpi <= 0:
+                raise ValueError("la resolution (DPI) doit etre un nombre entier positif")
         except Exception as exc:
             messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
             return

@@ -28,9 +28,17 @@ Avec PdfAtelier, aucun fichier ne quitte jamais votre ordinateur.
   vers PDF (assemblage d'une série de photos/scans en un seul document).
 - **Filigrane** : appliquer un texte en surimpression sur toutes les pages
   (ex : "CONFIDENTIEL", "BROUILLON"), avec opacité/angle/taille réglables.
+- **Numéroter les pages** : ajouter un numéro de page (position, format et
+  point de départ réglables) sur toutes les pages.
 - **Protection par mot de passe** : chiffrer ou déchiffrer un PDF.
 - **Extraction de texte** : récupérer le texte brut de chaque page pour le
   copier ou le rechercher.
+- **Extraire les images embarquées** : récupérer les photos/logos tels
+  qu'intégrés dans le PDF, sans avoir à rastériser la page entière.
+- **Extraire les pièces jointes** : récupérer les fichiers embarqués dans le
+  PDF (XML de facture électronique, images, autres PDF...).
+- **Métadonnées / Propriétés** : consulter, modifier ou purger le titre,
+  l'auteur, le sujet et les mots-clés d'un PDF.
 - **100 % local, zéro cloud** : chaque operation se fait entièrement sur
   votre machine. Aucun compte, aucune connexion internet requise, aucune
   limite d'usage.
@@ -90,6 +98,28 @@ page sélectionnée pour vérifier avant d'enregistrer.
   effectuées par des bibliothèques Python locales, jamais par un appel
   réseau.
 
+## Limites connues
+
+### Robustesse face à un PDF malveillant
+
+« 100 % local, zéro cloud » garantit la confidentialité de vos fichiers, mais
+ne signifie pas que PdfAtelier est totalement à l'abri de n'importe quel PDF.
+L'application ne fait ni analyse antivirus ni bac à sable (sandboxing) du
+contenu ouvert : la robustesse face à un PDF réellement malveillant dépend
+entièrement des bibliothèques tierces utilisées pour l'analyser et le rendre
+(`pypdf`, `pypdfium2`, `Pillow`, `reportlab`). Aucune exécution de contenu
+actif embarqué (JavaScript, macros) n'a été identifiée dans le périmètre de
+PdfAtelier — ni `pypdf` (manipulation structurelle du PDF) ni le moteur de
+rendu `pypdfium2` n'exécutent de scripts embarqués. Des protections contre
+les fichiers piégés sont en place (limite anti-bombe-de-décompression sur les
+images embarquées, plafond de mégapixels avant le rendu d'une page à
+`/MediaBox` démesuré), mais aucun logiciel ne peut garantir l'absence
+totale de vulnérabilité de déni de service dans ses dépendances. Par
+précaution, gardez la même vigilance qu'avec tout fichier téléchargé :
+évitez d'ouvrir un PDF de provenance totalement inconnue sans un minimum de
+prudence, et gardez vos dépendances à jour si vous lancez PdfAtelier depuis
+le code source.
+
 ## Créer un exécutable autonome (.exe)
 
 Pour distribuer l'outil sans que le destinataire ait besoin d'installer
@@ -121,7 +151,7 @@ python -m unittest discover tests -v
 
 ```
 pdf_ops.py            # toute la logique PDF (pure, testable sans GUI)
-gui.py                 # interface graphique Tkinter (8 onglets)
+gui.py                 # interface graphique Tkinter (10 onglets)
 tests/                 # tests automatises
 requirements.txt      # dependances (pypdf, pypdfium2, reportlab, Pillow)
 Lancer.vbs            # raccourci de lancement double-clic (sans console)

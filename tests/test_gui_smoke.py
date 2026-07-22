@@ -295,6 +295,72 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertIn("1 fichier(s)", self.info_messages[0])
         self.assertIn("compresse", self.info_messages[0])
 
+    # -- Convertir (PDF vers images) -----------------------------------------------
+
+    def test_p2i_run_rejects_a_zero_dpi_without_starting_a_background_thread(self):
+        # Point 14 de l'audit : un DPI a 0 (faute de frappe plausible) doit
+        # etre refuse immediatement, avec le meme message "Reglages
+        # invalides" que les autres champs numeriques mal saisis - jamais en
+        # ouvrant la fenetre de progression pour echouer seulement une fois
+        # le traitement lance en arriere-plan.
+        src = make_pdf(self.tmp / "p.pdf", num_pages=1)
+        self.app.p2i_source_path = src
+        self.app.p2i_source_var.set(src.name)
+        self.app.p2i_dpi_var.set(0)
+
+        output_dir = self.tmp / "out"
+        output_dir.mkdir()
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(output_dir)):
+            button = find_button(self.app.convert_tab, "Convertir en images...")
+            self.assertIsNotNone(button)
+            button.invoke()
+
+        self.assertEqual(len(self.warning_messages), 1)
+        self.assertIn("Reglages invalides", self.warning_messages[0])
+        self.assertIn("resolution", self.warning_messages[0].lower())
+        self.assertFalse(self.info_messages or self.error_messages)
+        # Aucune image ne doit avoir ete produite : le traitement n'a jamais
+        # ete lance.
+        self.assertEqual(list(output_dir.iterdir()), [])
+
+    def test_p2i_run_rejects_a_negative_dpi_without_starting_a_background_thread(self):
+        src = make_pdf(self.tmp / "p.pdf", num_pages=1)
+        self.app.p2i_source_path = src
+        self.app.p2i_source_var.set(src.name)
+        self.app.p2i_dpi_var.set(-50)
+
+        output_dir = self.tmp / "out"
+        output_dir.mkdir()
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(output_dir)):
+            button = find_button(self.app.convert_tab, "Convertir en images...")
+            self.assertIsNotNone(button)
+            button.invoke()
+
+        self.assertEqual(len(self.warning_messages), 1)
+        self.assertIn("Reglages invalides", self.warning_messages[0])
+        self.assertFalse(self.info_messages or self.error_messages)
+
+    def test_p2i_run_with_a_valid_dpi_still_converts_in_the_background(self):
+        # Non-regression : la nouvelle validation ne doit pas bloquer un DPI
+        # valide.
+        src = make_pdf(self.tmp / "p.pdf", num_pages=1)
+        self.app.p2i_source_path = src
+        self.app.p2i_source_var.set(src.name)
+        self.app.p2i_dpi_var.set(72)
+
+        output_dir = self.tmp / "out"
+        output_dir.mkdir()
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(output_dir)):
+            button = find_button(self.app.convert_tab, "Convertir en images...")
+            self.assertIsNotNone(button)
+            button.invoke()
+
+        pump(self.root, self._done)
+
+        self.assertEqual(len(self.info_messages), 1)
+        self.assertFalse(self.warning_messages or self.error_messages)
+        self.assertEqual(len(list(output_dir.glob("*.png"))), 1)
+
     # -- Numeroter (fichier unique) -----------------------------------------------
 
     def test_page_numbers_run_single_file_in_background(self):
@@ -619,6 +685,33 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertEqual(len(PdfReader(str(output)).pages), 1200)
         self.assertEqual(len(self.info_messages), 1)
         self.assertIn("1 fichier(s)", self.info_messages[0])
+
+
+class DpiAwarenessTestCase(unittest.TestCase):
+    """Audit, dimension 18 : le processus doit etre rendu explicitement
+    Per-Monitor V2 DPI Aware avant toute fenetre Tk, pour eviter un rendu
+    flou sur les ecrans a mise a l'echelle superieure a 100% (125%/150%/
+    200%, tres courant sur portables/ecrans modernes). Meme pattern deja
+    applique et verifie sur les projets GuideExpress et Enveloppe."""
+
+    def test_configure_dpi_awareness_is_idempotent_and_does_not_raise(self):
+        # Deja appele une fois a l'import de gui.py (niveau module) : un
+        # second appel explicite ne doit rien refaire ni lever.
+        gui._configure_dpi_awareness()
+        gui._configure_dpi_awareness()
+        self.assertTrue(gui._dpi_awareness_configured)
+
+    @unittest.skipUnless(sys.platform == "win32", "verification specifique a l'API Win32")
+    def test_process_is_actually_per_monitor_v2_dpi_aware_on_windows(self):
+        import ctypes
+        gui._configure_dpi_awareness()
+        user32 = ctypes.windll.user32
+        if not hasattr(user32, "GetThreadDpiAwarenessContext"):
+            self.skipTest("GetThreadDpiAwarenessContext indisponible sur ce Windows (trop ancien)")
+        current_context = user32.GetThreadDpiAwarenessContext()
+        per_monitor_v2 = ctypes.c_void_p(-4)
+        is_pm_v2 = bool(user32.AreDpiAwarenessContextsEqual(current_context, per_monitor_v2))
+        self.assertTrue(is_pm_v2, "le processus devrait etre Per-Monitor V2 DPI Aware apres _configure_dpi_awareness()")
 
 
 if __name__ == "__main__":

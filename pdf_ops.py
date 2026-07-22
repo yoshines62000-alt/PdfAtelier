@@ -234,6 +234,15 @@ def compress_pdf(
     """Recompresse les images integrees (JPEG, qualite et dimension max
     reglables) et les flux de contenu. Un document sans image embarquee ne
     beneficiera que de la compression des flux (marginale)."""
+    # Une qualite ou une dimension nulle/negative n'a aucun sens et n'etait
+    # auparavant jamais validee (bug trouve a l'audit, meme famille que le
+    # DPI de pdf_to_images) : selon la valeur, cela produisait silencieusement
+    # une image degradee/vide plutot qu'un message clair sur un reglage
+    # invalide.
+    if image_quality <= 0 or image_quality > 100:
+        raise PdfOpsError("La qualite JPEG doit etre un nombre entier entre 1 et 100.")
+    if max_dimension <= 0:
+        raise PdfOpsError("La dimension maximale doit etre un nombre entier positif.")
     original_size = Path(input_path).stat().st_size
     reader = _open_reader(input_path, password=password)
     writer = PdfWriter()
@@ -328,6 +337,16 @@ def pdf_to_images(
     l'audit, corrige avec le meme mecanisme de contournement de collision
     (verifier `.exists()` sur le disque) que celui deja en place dans
     extract_attachments/extract_embedded_images/split_pdf_by_ranges."""
+    # Un DPI nul ou negatif (faute de frappe plausible : suppression
+    # accidentelle d'un chiffre laissant "0") n'a aucun sens physique et
+    # n'etait auparavant jamais valide : `scale` devenait 0 ou negatif et
+    # `page.render()` levait une exception technique brute de pdfium/Pillow
+    # ("ValueError: Crop exceeds page dimensions") au lieu d'un message
+    # comprehensible - bug trouve a l'audit. Verifie AVANT toute ouverture de
+    # fichier/import de pdfium pour echouer aussi vite et proprement que
+    # possible.
+    if dpi <= 0:
+        raise PdfOpsError("La resolution (DPI) doit etre un nombre entier positif.")
     import pypdfium2 as pdfium
 
     output_dir = Path(output_dir)
@@ -408,6 +427,12 @@ def add_text_watermark(
     input_path: Path, output_path: Path, text: str, opacity: float = 0.3,
     font_size: int = 40, angle: float = 45.0, password: Optional[str] = None,
 ) -> None:
+    # Une taille de police nulle ou negative n'a aucun sens (bug trouve a
+    # l'audit, meme famille que le DPI de pdf_to_images) : reportlab
+    # l'acceptait auparavant sans lever d'exception, produisant un filigrane
+    # invisible plutot qu'un message clair sur un reglage invalide.
+    if font_size <= 0:
+        raise PdfOpsError("La taille de police doit etre un nombre positif.")
     import io
 
     from reportlab.lib.colors import Color
@@ -462,6 +487,11 @@ def add_page_numbers(
 
     if position not in _PAGE_NUMBER_POSITIONS:
         raise PdfOpsError(f"Position de numerotation invalide : {position}")
+    # Meme validation que add_text_watermark/pdf_to_images (bug trouve a
+    # l'audit) : une taille de police nulle ou negative n'a aucun sens et
+    # produisait silencieusement un numero de page invisible.
+    if font_size <= 0:
+        raise PdfOpsError("La taille de police doit etre un nombre positif.")
     fmt = _latin1_safe(fmt)
     reader = _open_reader(input_path, password=password)
     writer = PdfWriter()
