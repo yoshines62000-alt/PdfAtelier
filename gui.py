@@ -47,6 +47,16 @@ class PdfAtelierApp:
         self.root = root
         self.root.title(APP_TITLE)
         self.root.geometry("1020x680")
+        # Sans taille minimale, rien n'empeche de reduire la fenetre bien en
+        # dessous de sa taille de contenu naturelle : a 480x320, les libelles
+        # des 10 onglets se chevauchent/tronquent et le bouton d'action de
+        # l'onglet Compresser sort entierement de la zone visible, sans
+        # barre de defilement de secours - blocage fonctionnel reproductible
+        # a 100% sur un simple redimensionnement de fenetre (bug trouve a
+        # l'audit). La taille minimale reprend la taille par defaut, deja
+        # verifiee comme suffisante pour que tous les onglets restent
+        # lisibles et cliquables.
+        self.root.minsize(1020, 680)
 
         icon_path = _resource_path("icon.ico")
         if icon_path.exists():
@@ -1304,14 +1314,21 @@ class PdfAtelierApp:
         base_name = self.eei_source_path.stem
         password = self.eei_password_var.get() or None
 
-        result = self._run_safely(
-            lambda: ops.extract_embedded_images(self.eei_source_path, output_dir, base_name, password=password)
-        )
-        if result is not None:
+        # Execute en arriere-plan (comme Fusionner/Diviser/Pages/Proprietes) :
+        # un PDF a nombreuses images embarquees peut prendre plusieurs
+        # secondes a traiter, ce qui gelait auparavant totalement l'UI
+        # (aucune barre de progression, thread principal Tk bloque - cas
+        # residuel trouve a l'audit, jamais migre lors du round precedent).
+        def on_success(result):
             if not result:
                 messagebox.showinfo(APP_TITLE, "Aucune image embarquee trouvee dans ce PDF.")
             else:
                 messagebox.showinfo(APP_TITLE, f"{len(result)} image(s) extraite(s) dans {output_dir}")
+
+        self._run_safely_in_background(
+            lambda: ops.extract_embedded_images(self.eei_source_path, output_dir, base_name, password=password),
+            on_success,
+        )
 
     def _eea_pick_source(self):
         path = self._pick_pdf()
@@ -1329,14 +1346,18 @@ class PdfAtelierApp:
             return
         password = self.eea_password_var.get() or None
 
-        result = self._run_safely(
-            lambda: ops.extract_attachments(self.eea_source_path, output_dir, password=password)
-        )
-        if result is not None:
+        # Meme migration en arriere-plan que _eei_run - un PDF a de nombreuses
+        # pieces jointes gelait auparavant l'UI le temps de l'extraction.
+        def on_success(result):
             if not result:
                 messagebox.showinfo(APP_TITLE, "Aucune piece jointe trouvee dans ce PDF.")
             else:
                 messagebox.showinfo(APP_TITLE, f"{len(result)} piece(s) jointe(s) extraite(s) dans {output_dir}")
+
+        self._run_safely_in_background(
+            lambda: ops.extract_attachments(self.eea_source_path, output_dir, password=password),
+            on_success,
+        )
 
     def _i2p_add_files(self):
         paths = filedialog.askopenfilenames(title="Choisir des images", filetypes=IMAGE_FILETYPES)
@@ -1360,7 +1381,13 @@ class PdfAtelierApp:
         output = self._save_pdf_as("images.pdf")
         if not output:
             return
-        self._run_safely(lambda: ops.images_to_pdf(self.i2p_files, output), f"PDF genere : {output.name}")
+        # Meme migration en arriere-plan que le reste de l'onglet Convertir -
+        # assembler de nombreuses images haute resolution en PDF gelait
+        # auparavant l'UI (cas residuel trouve a l'audit).
+        self._run_safely_in_background(
+            lambda: ops.images_to_pdf(self.i2p_files, output),
+            success_message=f"PDF genere : {output.name}",
+        )
 
     # -- onglet Filigrane -----------------------------------------------------------
 
@@ -1732,14 +1759,23 @@ class PdfAtelierApp:
             messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
             return
         password = self.text_password_var.get() or None
-        result = self._run_safely(lambda: ops.extract_text(self.text_source_path, password=password))
-        if result is not None:
+
+        # Execute en arriere-plan : l'extraction de texte sur un document
+        # volumineux gelait auparavant l'UI (cas residuel trouve a l'audit).
+        # `on_success` s'execute sur le thread principal (documente par
+        # _run_safely_in_background), donc peut toucher aux widgets Tkinter
+        # sans risque.
+        def on_success(result):
             self.text_output.delete("1.0", END)
             for index, page_text in enumerate(result, start=1):
                 self.text_output.insert(END, f"--- Page {index} ---\n{page_text}\n\n")
             self._text_search_matches = []
             self._text_search_index = -1
             self.text_search_status_var.set("")
+
+        self._run_safely_in_background(
+            lambda: ops.extract_text(self.text_source_path, password=password), on_success,
+        )
 
     def _text_search_run(self):
         self.text_output.tag_remove("search_match", "1.0", END)

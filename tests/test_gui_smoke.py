@@ -22,6 +22,7 @@ ce fichier est le premier, construit sur le meme principe que
 tests/test_pdf_ops.py (aucun mock de la logique metier, de vrais fichiers
 PDF generes sur disque)."""
 
+import gc
 import sys
 import tempfile
 import time
@@ -32,12 +33,13 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
+from PIL import Image
 from reportlab.pdfgen import canvas
 
 import gui
 import pdf_ops as ops
-from test_pdf_ops import make_pdf  # reutilise le generateur de PDF de test deja etabli
+from test_pdf_ops import make_pdf, make_pdf_with_image  # reutilise les generateurs de PDF de test deja etablis
 
 try:
     from tkinter import Tk
@@ -160,6 +162,22 @@ class GuiSmokeTestCase(unittest.TestCase):
                 self.root.after_cancel(after_id)
             except Exception:
                 pass
+        # `self.app` retient des dizaines de StringVar/IntVar/BooleanVar (une
+        # par onglet/champ) qui gardent chacune une reference a l'interprete
+        # Tcl de `self.root`. Sans ce `del` + `gc.collect()` explicites AVANT
+        # `root.destroy()`, ces variables ne sont desallouees que plus tard,
+        # au gre du ramasse-miettes Python - potentiellement pendant un TEST
+        # SUIVANT, une fois l'interprete Tcl de CE root deja detruit. Leur
+        # `__del__` tente alors d'appeler Tcl sur un interprete mort, ce qui
+        # echoue avec "main thread is not in main loop" et peut perturber
+        # l'etat Tcl global du processus (observe a l'audit : plantages/
+        # blocages intermittents de la suite complete via `unittest discover`,
+        # absents quand ce fichier de test tourne seul). Les liberer ici,
+        # pendant que l'interprete est encore vivant, les fait disparaitre
+        # proprement et immediatement plutot que de laisser trainer des
+        # `__del__` differes qui visent un interprete deja mort.
+        del self.app
+        gc.collect()
         self.root.destroy()
         self.tmp_dir.cleanup()
 
@@ -419,6 +437,117 @@ class GuiSmokeTestCase(unittest.TestCase):
         # optimisation : le nettoyage ne se declenchait jamais).
         self.assertEqual(self.app.properties_title_var.get(), "")
         self.assertEqual(self.app.properties_author_var.get(), "")
+
+    # -- Extraire images/pieces jointes, Texte, Images->PDF (point 9 de l'audit) --
+    # Ces quatre traitements restaient synchrones sur le thread principal Tk,
+    # contrairement au reste de l'application deja migre (Fusionner/Diviser/
+    # Pages/Proprietes/mode fichier unique de Compresser/Filigrane/
+    # Numeroter/Protection) - cas residuels trouves a l'audit, jamais
+    # couverts par ce fichier de tests avant ce round de correctifs.
+
+    def test_extract_embedded_images_run_in_background(self):
+        source_image = self.tmp / "photo.png"
+        Image.new("RGB", (40, 30), color=(10, 20, 30)).save(source_image)
+        pdf = make_pdf_with_image(self.tmp / "doc.pdf", source_image)
+        self.app.eei_source_path = pdf
+        self.app.eei_source_var.set(pdf.name)
+
+        output_dir = self.tmp / "out_images"
+        output_dir.mkdir()
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(output_dir)):
+            button = find_button(self.app.convert_tab, "Extraire les images...")
+            self.assertIsNotNone(button)
+            t0 = time.perf_counter()
+            button.invoke()
+            click_duration = time.perf_counter() - t0
+
+        pump(self.root, self._done)
+
+        self.assertLess(click_duration, 1.0)
+        self.assertEqual(len(list(output_dir.glob("*.png"))), 1)
+        self.assertEqual(len(self.info_messages), 1)
+        self.assertIn("1 image(s)", self.info_messages[0])
+
+    def test_extract_attachments_run_in_background(self):
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        writer.add_attachment("facture.xml", b"<xml>contenu</xml>")
+        pdf = self.tmp / "avec_pj.pdf"
+        with open(pdf, "wb") as f:
+            writer.write(f)
+        self.app.eea_source_path = pdf
+        self.app.eea_source_var.set(pdf.name)
+
+        output_dir = self.tmp / "out_attachments"
+        output_dir.mkdir()
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(output_dir)):
+            button = find_button(self.app.convert_tab, "Extraire les pieces jointes...")
+            self.assertIsNotNone(button)
+            t0 = time.perf_counter()
+            button.invoke()
+            click_duration = time.perf_counter() - t0
+
+        pump(self.root, self._done)
+
+        self.assertLess(click_duration, 1.0)
+        extracted = list(output_dir.glob("*.xml"))
+        self.assertEqual(len(extracted), 1)
+        self.assertEqual(extracted[0].read_bytes(), b"<xml>contenu</xml>")
+        self.assertEqual(len(self.info_messages), 1)
+        self.assertIn("1 piece(s) jointe(s)", self.info_messages[0])
+
+    def test_text_extraction_run_in_background(self):
+        src = make_pdf(self.tmp / "texte.pdf", num_pages=2, labels=["Bonjour", "Au revoir"])
+        self.app.text_source_path = src
+        self.app.text_source_var.set(src.name)
+
+        button = find_button(self.app.text_tab, "Extraire")
+        self.assertIsNotNone(button)
+        t0 = time.perf_counter()
+        button.invoke()
+        click_duration = time.perf_counter() - t0
+
+        # A la difference des autres onglets migres, une extraction de texte
+        # reussie n'affiche aucune messagebox (le resultat va directement
+        # dans le widget Text) : on attend donc que le texte apparaisse
+        # plutot que self._done(), qui ne deviendrait jamais vrai ici.
+        pump(self.root, lambda: self.app.text_output.get("1.0", "end").strip() != "")
+
+        self.assertLess(click_duration, 1.0)
+        content = self.app.text_output.get("1.0", "end")
+        self.assertIn("Bonjour", content)
+        self.assertIn("Au revoir", content)
+        self.assertFalse(self.warning_messages or self.error_messages)
+
+    def test_images_to_pdf_run_in_background(self):
+        image_path = self.tmp / "img1.png"
+        Image.new("RGB", (30, 20), color=(50, 60, 70)).save(image_path)
+        self.app.i2p_files = [image_path]
+        gui.PdfAtelierApp._reload_listbox(self.app.i2p_listbox, self.app.i2p_files)
+
+        output = self.tmp / "images.pdf"
+        with mock.patch("gui.filedialog.asksaveasfilename", return_value=str(output)):
+            button = find_button(self.app.convert_tab, "Assembler en PDF...")
+            self.assertIsNotNone(button)
+            t0 = time.perf_counter()
+            button.invoke()
+            click_duration = time.perf_counter() - t0
+
+        pump(self.root, self._done)
+
+        self.assertLess(click_duration, 1.0)
+        self.assertTrue(output.exists())
+        self.assertEqual(len(PdfReader(str(output)).pages), 1)
+        self.assertEqual(self.info_messages, [f"PDF genere : {output.name}"])
+
+    # -- Taille minimale de fenetre (point 16 de l'audit) --------------------------
+
+    def test_window_has_a_minimum_size_preventing_clipped_tabs_and_buttons(self):
+        # Sans minsize, reduire la fenetre bien en dessous de sa taille de
+        # contenu naturelle rendait certains boutons d'action totalement
+        # inaccessibles (ex: onglet Compresser a 480x320) - bug trouve a
+        # l'audit, reproductible a 100% sur un simple redimensionnement.
+        self.assertEqual(self.root.minsize(), (1020, 680))
 
     # -- Mesure empirique de reactivite (methode de l'audit) -----------------------
 

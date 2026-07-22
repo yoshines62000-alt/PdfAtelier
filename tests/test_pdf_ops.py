@@ -3,6 +3,7 @@ fichiers PDF/PNG generes sur disque (pas de mocks) - fusion, division,
 gestion des pages, compression, conversion, filigrane, mot de passe,
 extraction de texte."""
 
+import os
 import sys
 import tempfile
 import unittest
@@ -132,6 +133,53 @@ def make_pdf_with_image(path: Path, image_path: Path) -> Path:
     c.drawImage(str(image_path), 0, 0, width=400, height=400)
     c.showPage()
     c.save()
+    return path
+
+
+def make_pdf_with_outline_and_form_field(path: Path, num_pages: int = 2) -> Path:
+    """PDF avec un signet (pointant sur la page 1) et un champ de
+    formulaire texte /AcroForm rempli, porte par un widget /Annots sur la
+    page 1 - reproduit les deux structures que add_page() perd
+    silencieusement (regression trouvee a l'audit, points 7/8), pour
+    verifier qu'elles survivent bien a merge/split/proprietes/protection.
+
+    Construction bas niveau (pypdf.generic) : PdfWriter n'expose pas d'API
+    haut niveau simple pour creer un champ de formulaire dans cette version
+    (meme limitation deja notee dans le rapport d'audit)."""
+    from pypdf.generic import ArrayObject, BooleanObject, RectangleObject, TextStringObject
+
+    writer = PdfWriter()
+    for _ in range(num_pages):
+        writer.add_blank_page(width=200, height=200)
+    writer.add_outline_item("Mon signet", 0)
+
+    page = writer.pages[0]
+    field = DictionaryObject()
+    field.update({
+        NameObject("/FT"): NameObject("/Tx"),
+        NameObject("/T"): TextStringObject("champ_texte"),
+        NameObject("/V"): TextStringObject("valeur remplie"),
+        NameObject("/Rect"): RectangleObject([20, 20, 180, 40]),
+        NameObject("/Subtype"): NameObject("/Widget"),
+        NameObject("/Type"): NameObject("/Annot"),
+        NameObject("/P"): page.indirect_reference,
+        NameObject("/F"): NumberObject(4),
+    })
+    field_ref = writer._add_object(field)
+    if "/Annots" in page:
+        page["/Annots"].append(field_ref)
+    else:
+        page[NameObject("/Annots")] = ArrayObject([field_ref])
+
+    acroform = DictionaryObject()
+    acroform.update({
+        NameObject("/Fields"): ArrayObject([field_ref]),
+        NameObject("/NeedAppearances"): BooleanObject(True),
+    })
+    writer._root_object[NameObject("/AcroForm")] = writer._add_object(acroform)
+
+    with open(path, "wb") as f:
+        writer.write(f)
     return path
 
 
@@ -896,6 +944,160 @@ class PdfOpsTestCase(unittest.TestCase):
         self.assertNotIn("bad.bin", names_extracted)
         good_path = next(p for p in extracted if p.name == "good.txt")
         self.assertEqual(good_path.read_bytes(), b"contenu valide")
+
+    # -- preservation des signets/AcroForm (points 7/8 de l'audit) ---------------
+
+    def test_merge_pdfs_preserves_outline_and_form_fields(self):
+        # Regression trouvee a l'audit : merge_pdfs reconstruisait la sortie
+        # via une boucle add_page() sur un PdfWriter neuf, qui ne clone que
+        # l'objet page - jamais l'arbre /Outlines (signets) ni le /AcroForm
+        # (formulaires) du document source.
+        pdf_a = make_pdf_with_outline_and_form_field(self.tmp / "a.pdf", num_pages=2)
+        pdf_b = make_pdf(self.tmp / "b.pdf", num_pages=1)
+        output = self.tmp / "merged.pdf"
+        ops.merge_pdfs([pdf_a, pdf_b], output)
+
+        self.assertEqual(ops.get_page_count(output), 3)
+        reader = PdfReader(str(output))
+        self.assertEqual(len(reader.outline), 1)
+        self.assertEqual(str(reader.outline[0].title), "Mon signet")
+        fields = reader.get_fields()
+        self.assertIn("champ_texte", fields)
+        self.assertEqual(fields["champ_texte"]["/V"], "valeur remplie")
+
+    def test_split_pdf_by_ranges_preserves_outline_and_form_fields_on_relevant_part(self):
+        # Meme regression que merge_pdfs, pour split_pdf_by_ranges : diviser
+        # un PDF avec signet/formulaire ne doit perdre ni l'un ni l'autre sur
+        # la partie qui contient effectivement la page concernee, et ne doit
+        # pas non plus les faire apparaitre par erreur sur l'autre partie.
+        pdf = make_pdf_with_outline_and_form_field(self.tmp / "doc.pdf", num_pages=2)
+        paths = ops.split_pdf_by_ranges(pdf, [(1, 1), (2, 2)], self.tmp / "split", "doc")
+
+        reader_p1 = PdfReader(str(paths[0]))
+        self.assertEqual(len(reader_p1.outline), 1)
+        self.assertIn("champ_texte", reader_p1.get_fields() or {})
+
+        reader_p2 = PdfReader(str(paths[1]))
+        self.assertEqual(len(reader_p2.outline), 0)
+        self.assertFalse(reader_p2.get_fields())
+
+    def test_reorder_and_filter_pages_preserves_outline_and_form_fields(self):
+        # reorder_and_filter_pages reconstruisait elle aussi la sortie via
+        # add_page() sur un PdfWriter neuf, meme apres avoir correctement
+        # attache le document complet (avec signets/formulaire) a une etape
+        # intermediaire - la meme regression s'appliquait donc a l'onglet
+        # Pages, non listee explicitement dans le rapport d'audit mais issue
+        # de la meme cause racine.
+        pdf = make_pdf_with_outline_and_form_field(self.tmp / "doc.pdf", num_pages=2)
+        output = self.tmp / "reordered.pdf"
+        ops.reorder_and_filter_pages(pdf, output, page_order=[2, 1])
+
+        reader = PdfReader(str(output))
+        self.assertEqual(len(reader.pages), 2)
+        self.assertEqual(len(reader.outline), 1)
+        fields = reader.get_fields()
+        self.assertIn("champ_texte", fields)
+        self.assertEqual(fields["champ_texte"]["/V"], "valeur remplie")
+
+    def test_set_metadata_preserves_outline_and_form_fields(self):
+        pdf = make_pdf_with_outline_and_form_field(self.tmp / "doc.pdf", num_pages=1)
+        output = self.tmp / "meta.pdf"
+        ops.set_metadata(pdf, output, {"title": "Un titre"})
+
+        reader = PdfReader(str(output))
+        self.assertEqual(len(reader.outline), 1)
+        self.assertIn("champ_texte", reader.get_fields())
+        self.assertEqual((reader.metadata or {}).get("/Title"), "Un titre")
+
+    def test_set_metadata_purge_still_preserves_outline_and_form_fields(self):
+        # La purge des metadonnees (dict vide) ne doit pas non plus faire
+        # disparaitre les signets/formulaires : ce sont deux structures
+        # distinctes du /Root, jamais touchees par set_metadata au-dela de
+        # /Info (voir docstring de set_metadata).
+        pdf = make_pdf_with_outline_and_form_field(self.tmp / "doc.pdf", num_pages=1)
+        output = self.tmp / "meta_purge.pdf"
+        ops.set_metadata(pdf, output, {})
+
+        reader = PdfReader(str(output))
+        self.assertEqual(len(reader.outline), 1)
+        self.assertIn("champ_texte", reader.get_fields())
+
+    def test_set_password_preserves_outline_and_form_fields(self):
+        pdf = make_pdf_with_outline_and_form_field(self.tmp / "doc.pdf", num_pages=1)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+
+        reader = PdfReader(str(protected))
+        self.assertTrue(reader.is_encrypted)
+        reader.decrypt("secret")
+        self.assertEqual(len(reader.outline), 1)
+        self.assertIn("champ_texte", reader.get_fields())
+
+    def test_remove_password_preserves_outline_and_form_fields(self):
+        pdf = make_pdf_with_outline_and_form_field(self.tmp / "doc.pdf", num_pages=1)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+
+        unprotected = self.tmp / "unprotected.pdf"
+        ops.remove_password(protected, unprotected, password="secret")
+
+        reader = PdfReader(str(unprotected))
+        self.assertFalse(reader.is_encrypted)
+        self.assertEqual(len(reader.outline), 1)
+        self.assertIn("champ_texte", reader.get_fields())
+
+    # -- messages actionnables sur PDF invalide/corrompu (point 1 de l'audit) ----
+
+    def test_get_page_count_on_empty_file_raises_a_clear_french_error(self):
+        # Regression trouvee a l'audit : _open_reader n'enveloppait pas la
+        # construction de PdfReader() dans un try/except, laissant remonter
+        # l'exception technique brute de pypdf (EmptyFileError, en anglais)
+        # jusqu'au filet generique du GUI plutot qu'un message actionnable.
+        empty = self.tmp / "vide.pdf"
+        empty.write_bytes(b"")
+        with self.assertRaises(ops.PdfOpsError) as ctx:
+            ops.get_page_count(empty)
+        self.assertIn("vide.pdf", str(ctx.exception))
+        self.assertIn("PDF valide", str(ctx.exception))
+
+    def test_get_page_count_on_truncated_pdf_raises_a_clear_french_error(self):
+        valid = make_pdf(self.tmp / "source.pdf", num_pages=3)
+        truncated = self.tmp / "tronque.pdf"
+        data = valid.read_bytes()
+        truncated.write_bytes(data[: len(data) // 2])
+        with self.assertRaises(ops.PdfOpsError) as ctx:
+            ops.get_page_count(truncated)
+        self.assertIn("tronque.pdf", str(ctx.exception))
+        self.assertIn("PDF valide", str(ctx.exception))
+
+    def test_get_page_count_on_non_pdf_file_raises_a_clear_french_error(self):
+        fake = self.tmp / "notepad.pdf"
+        fake.write_bytes(b"%PDF-1.4\n" + os.urandom(200))
+        with self.assertRaises(ops.PdfOpsError) as ctx:
+            ops.get_page_count(fake)
+        self.assertIn("PDF valide", str(ctx.exception))
+
+    # -- borne de version pypdf (point 24 de l'audit) -----------------------------
+
+    def test_requirements_pins_pypdf_below_the_next_major_version(self):
+        # requirements.txt declarait pypdf sans borne haute alors que
+        # pdf_ops.py documente lui-meme un changement de comportement prevu
+        # en 7.0 (modification de page encore rattachee a un reader seul) -
+        # sans plafond, un futur `pip install -r requirements.txt` pourrait
+        # installer 7.0 sans que le code n'ait ete valide contre elle.
+        requirements_path = Path(__file__).resolve().parent.parent / "requirements.txt"
+        content = requirements_path.read_text(encoding="utf-8")
+        # "pypdf" seul, pas "pypdfium2" (dependance distincte, egalement
+        # listee dans requirements.txt) : on ne garde que les lignes dont le
+        # nom de paquet (avant tout extra "[...]" ou specificateur de
+        # version) est exactement "pypdf".
+        pypdf_lines = [
+            line for line in content.splitlines()
+            if not line.strip().startswith("#")
+            and line.strip().lower().split("[")[0].split(">")[0].split("=")[0].strip() == "pypdf"
+        ]
+        self.assertEqual(len(pypdf_lines), 1)
+        self.assertIn("<7.0", pypdf_lines[0])
 
 
 if __name__ == "__main__":

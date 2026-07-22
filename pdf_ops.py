@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.errors import PyPdfError
+from pypdf.errors import PdfReadError, PyPdfError
 from PIL import Image
 
 
@@ -24,7 +24,21 @@ class PdfOpsError(Exception):
 
 def _open_reader(input_path: Path, password: Optional[str] = None) -> PdfReader:
     input_path = Path(input_path)
-    reader = PdfReader(str(input_path))
+    try:
+        reader = PdfReader(str(input_path))
+    except PdfReadError as exc:
+        # PdfReadError couvre notamment EmptyFileError (fichier de 0 octet)
+        # et PdfStreamError (flux tronque/corrompu) - sans cette conversion,
+        # l'exception technique brute de pypdf (ex: "Stream has ended
+        # unexpectedly", en anglais) remontait telle quelle jusqu'au filet
+        # generique du GUI, affichant "Une erreur inattendue s'est produite :
+        # Stream has ended unexpectedly" a l'utilisateur - message
+        # incomprehensible pour un fichier renomme par erreur en .pdf, un
+        # telechargement interrompu ou un PDF corrompu (bug trouve a
+        # l'audit).
+        raise PdfOpsError(
+            f"Le fichier {input_path.name} n'est pas un PDF valide ou est corrompu."
+        ) from exc
     if reader.is_encrypted:
         if not password:
             # PDF protege uniquement par un mot de passe "proprietaire"
@@ -90,8 +104,15 @@ def merge_pdfs(input_paths: list, output_path: Path, passwords: Optional[list] =
     writer = PdfWriter()
     for path, password in zip(input_paths, passwords):
         reader = _open_reader(Path(path), password=password)
-        for page in reader.pages:
-            writer.add_page(page)
+        # writer.append() (plutot qu'une boucle add_page()) clone aussi la
+        # structure /Outlines (signets/table des matieres) et /AcroForm
+        # (champs de formulaire interactifs) de chaque document source, en
+        # plus de ses pages - add_page() ne clone que l'objet page seul,
+        # faisant disparaitre silencieusement toute navigation par signets
+        # et toute interactivite de formulaire dans le PDF fusionne (bug
+        # trouve a l'audit ; deja fait correctement ailleurs dans ce fichier,
+        # voir compress_pdf/add_text_watermark/add_page_numbers).
+        writer.append(reader)
     _write_output(writer, output_path)
 
 
@@ -116,8 +137,14 @@ def split_pdf_by_ranges(input_path: Path, ranges: list, output_dir: Path, base_n
         if start < 1 or end > page_count or start > end:
             raise PdfOpsError(f"Plage de pages invalide : {start}-{end} (document de {page_count} pages).")
         writer = PdfWriter()
-        for page_number in range(start, end + 1):
-            writer.add_page(reader.pages[page_number - 1])
+        # append(..., pages=[...]) (plutot qu'une boucle add_page()) au lieu
+        # de reconstruire un PdfWriter neuf page par page : pypdf filtre
+        # alors automatiquement les signets et les champs de formulaire du
+        # document source pour ne garder que ceux qui concernent reellement
+        # les pages extraites dans cette plage, au lieu de perdre purement et
+        # simplement les deux structures (bug trouve a l'audit, meme cause
+        # que merge_pdfs). `pages` attend une liste d'index 0-indexes.
+        writer.append(reader, pages=list(range(start - 1, end)))
         stem = f"{base_name}_{index:02d}_p{start}-{end}"
         output_path = output_dir / f"{stem}.pdf"
         counter = 1
@@ -167,8 +194,16 @@ def reorder_and_filter_pages(
             source_writer.pages[page_number - 1].rotate(extra_rotation)
 
     writer = PdfWriter()
-    for page_number in page_order:
-        writer.add_page(source_writer.pages[page_number - 1])
+    # append(..., pages=[...]) (plutot qu'une boucle add_page()) au lieu de
+    # reconstruire un PdfWriter neuf page par page : preserve les signets et
+    # les champs de formulaire du document, filtres/reordonnes par pypdf sur
+    # le sous-ensemble et l'ordre demandes - une boucle add_page() perdait
+    # les deux, meme si `source_writer` (l'etape intermediaire ci-dessus) les
+    # avait bien conserves (bug trouve a l'audit, meme cause que merge_pdfs/
+    # split_pdf_by_ranges). `source_writer` peut etre passe directement en
+    # source d'un nouvel append() : un PdfWriter s'utilise ici comme un
+    # lecteur.
+    writer.append(source_writer, pages=[page_number - 1 for page_number in page_order])
     _write_output(writer, output_path)
 
 
@@ -489,12 +524,13 @@ def set_metadata(
     """Remplace les metadonnees du PDF par exactement celles fournies dans
     `metadata` (memes cles que read_metadata) - un dict vide (ou avec
     uniquement des valeurs vides) purge completement le document. Comme
-    set_password/remove_password, reconstruit un PdfWriter neuf avec
-    uniquement les pages (jamais reader.metadata, jamais le /Root complet
-    du reader) : ni le dictionnaire d'informations (docinfo) ni le flux XMP
-    eventuel de la source ne sont jamais copies vers la sortie, purge ou
-    non - seul un appel explicite a add_metadata() en reintroduit. Le
-    /Producer devient "pypdf" a l'ecriture (comportement de la
+    set_password/remove_password, reconstruit un PdfWriter neuf via
+    writer.append(reader) : cela copie les pages ainsi que les signets et
+    les champs de formulaire (/Outlines, /AcroForm - voir merge_pdfs), mais
+    jamais reader.metadata ni le dictionnaire d'informations (docinfo) ni le
+    flux XMP eventuel de la source, purge ou non - seul un appel explicite a
+    add_metadata() en reintroduit (verifie : append() ne touche jamais a
+    /Info). Le /Producer devient "pypdf" a l'ecriture (comportement de la
     bibliotheque) : la purge ne peut pas l'effacer, seulement le remplacer.
 
     Si la source etait protegee par mot de passe, la sortie l'est A
@@ -506,8 +542,7 @@ def set_metadata(
     puisqu'un writer neuf n'est jamais chiffre par defaut)."""
     reader = _open_reader(input_path, password=password)
     writer = PdfWriter()
-    for page in reader.pages:
-        writer.add_page(page)
+    writer.append(reader)
     non_empty = {
         key: str(metadata[field]) for field, key in _METADATA_FIELDS.items()
         if metadata.get(field)
@@ -532,8 +567,11 @@ def set_password(
         raise PdfOpsError("Le mot de passe ne peut pas etre vide.")
     reader = _open_reader(input_path, password=password)
     writer = PdfWriter()
-    for page in reader.pages:
-        writer.add_page(page)
+    # writer.append() (plutot qu'une boucle add_page()) preserve les signets
+    # et les champs de formulaire du document (voir merge_pdfs) - une boucle
+    # add_page() les faisait disparaitre silencieusement au passage,
+    # protection par mot de passe ou non (bug trouve a l'audit).
+    writer.append(reader)
     writer.encrypt(user_password, owner_password or user_password, algorithm="AES-256")
     _write_output(writer, output_path)
 
@@ -541,8 +579,10 @@ def set_password(
 def remove_password(input_path: Path, output_path: Path, password: str) -> None:
     reader = _open_reader(input_path, password=password)
     writer = PdfWriter()
-    for page in reader.pages:
-        writer.add_page(page)
+    # Meme correctif que set_password : writer.append() preserve les
+    # signets/champs de formulaire, contrairement a la boucle add_page()
+    # utilisee auparavant (bug trouve a l'audit).
+    writer.append(reader)
     _write_output(writer, output_path)
 
 

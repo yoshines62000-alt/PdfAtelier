@@ -1,7 +1,15 @@
 # L'extra [crypto] installe le paquet "cryptography", requis par pypdf pour
 # le chiffrement/dechiffrement AES-256 (protection par mot de passe). Sans
 # lui, set_password()/remove_password() echouent avec DependencyError.
-pypdf[crypto]>=6.0
+#
+# Borne haute <7.0 : pdf_ops.py documente explicitement (reorder_and_filter_
+# pages, add_text_watermark) que pypdf 7.0 va deprecier le fait de modifier
+# une page encore rattachee a un reader seul, un comportement dont depend le
+# code actuel. Sans cette borne, un futur `pip install -r requirements.txt`
+# installerait 7.0 silencieusement, sans que le code n'ait ete teste/adapte
+# contre ce changement (bombe a retardement trouvee a l'audit) - a lever
+# uniquement apres avoir valide la suite de tests contre pypdf 7.0.
+pypdf[crypto]>=6.0,<7.0
 pypdfium2>=5.0
 reportlab>=4.0
 Pillow>=10.0
@@ -9,3 +17,16 @@ Pillow>=10.0
 # L'application fonctionne normalement sans lui (boutons "Ajouter..."
 # toujours disponibles), seul le glisser-depose est alors indisponible.
 tkinterdnd2>=0.6.2
+
+# Construire l'executable (PyInstaller) : toujours le faire depuis un venv
+# strictement limite a ce fichier (+ pyinstaller), jamais depuis
+# l'environnement Python global du poste de developpement. PyInstaller
+# embarque tout ce que l'analyse statique detecte dans l'environnement actif
+# meme si PdfAtelier ne l'importe jamais lui-meme (ex: numpy/lxml/
+# beautifulsoup4/fontTools installes globalement pour d'autres projets sur
+# la machine de build ont deja ete retrouves, a tort, dans le PKG-00.toc du
+# build local - constat de l'audit). Un venv dedie garantit un executable
+# plus petit et reproductible a partir de ce seul fichier :
+#   python -m venv build_venv
+#   build_venv\Scripts\pip install -r requirements.txt pyinstaller
+#   build_venv\Scripts\pyinstaller PdfAtelier.spec
