@@ -1,4 +1,7 @@
-pypdf>=6.0
+# L'extra [crypto] installe le paquet "cryptography", requis par pypdf pour
+# le chiffrement/dechiffrement AES-256 (protection par mot de passe). Sans
+# lui, set_password()/remove_password() echouent avec DependencyError.
+pypdf[crypto]>=6.0
 pypdfium2>=5.0
 reportlab>=4.0
 Pillow>=10.0
