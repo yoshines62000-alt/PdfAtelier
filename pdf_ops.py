@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from pypdf import PdfReader, PdfWriter
+from pypdf.errors import PyPdfError
 from PIL import Image
 
 
@@ -26,8 +27,20 @@ def _open_reader(input_path: Path, password: Optional[str] = None) -> PdfReader:
     reader = PdfReader(str(input_path))
     if reader.is_encrypted:
         if not password:
-            raise PdfOpsError(f"Le fichier {input_path.name} est protege par un mot de passe.")
-        if reader.decrypt(password) == 0:
+            # PDF protege uniquement par un mot de passe "proprietaire"
+            # (permissions restreintes : copier/imprimer...) mais sans mot
+            # de passe d'ouverture reel - categorie tres courante (exports
+            # administratifs/bancaires). Ce type de fichier s'ouvre
+            # nativement avec un mot de passe utilisateur vide, exactement
+            # comme le ferait Adobe Acrobat ou un navigateur, qui n'affichent
+            # jamais de demande de mot de passe pour ce cas. On tente donc
+            # une chaine vide avant d'exiger quoi que ce soit de
+            # l'utilisateur (bug trouve a l'audit : un mot de passe qui
+            # n'existe pas etait systematiquement reclame, bloquant tout
+            # l'outil sur ce type de PDF pourtant lisible partout ailleurs).
+            if reader.decrypt("") == 0:
+                raise PdfOpsError(f"Le fichier {input_path.name} est protege par un mot de passe.")
+        elif reader.decrypt(password) == 0:
             raise PdfOpsError(f"Mot de passe incorrect pour {input_path.name}.")
     return reader
 
@@ -197,9 +210,25 @@ def compress_pdf(
     images_total = 0
     images_recompressed = 0
     for page in writer.pages:
-        for img in page.images:
+        # Indexation manuelle (pas `for img in page.images`) : acceder a
+        # `page.images[i]` est ce qui declenche reellement le decodage de
+        # l'image (via pypdf), et c'est exactement ce qui peut lever une
+        # exception - notamment pypdf.errors.LimitReachedError, la
+        # protection anti-bombe-de-decompression native de pypdf, qui se
+        # declenche des qu'une image declare des dimensions demesurees
+        # (flux minuscule sur disque, bitmap theorique enorme). Boucler
+        # directement sur l'iterateur de page.images ferait lever cette
+        # exception PENDANT l'evaluation de la boucle for elle-meme, avant
+        # meme d'atteindre le `try:` ci-dessous - abandonnant alors la
+        # compression de TOUT le document au lieu de sauter uniquement
+        # l'image fautive (bug trouve a l'audit : meme classe de probleme
+        # que celui deja corrige dans extract_embedded_images, jamais
+        # applique ici jusqu'a present).
+        image_count = len(page.images)
+        for image_index in range(image_count):
             images_total += 1
             try:
+                img = page.images[image_index]
                 image = img.image
                 if image is None:
                     continue
@@ -211,13 +240,13 @@ def compress_pdf(
                 images_recompressed += 1
             except Exception:
                 # Certains formats d'image embarques (ex: CMYK, masques de
-                # transparence particuliers, image corrompue) ne se laissent
-                # pas toujours decoder/remplacer proprement : on garde alors
-                # l'image d'origine plutot que de faire echouer toute la
-                # compression pour une seule image problematique. On
-                # comptabilise l'echec plutot que de le passer sous silence,
-                # pour que l'utilisateur comprenne un taux de reduction
-                # plus faible que prevu.
+                # transparence particuliers, image corrompue, bombe de
+                # decompression) ne se laissent pas toujours decoder/
+                # remplacer proprement : on garde alors l'image d'origine
+                # plutot que de faire echouer toute la compression pour une
+                # seule image problematique. On comptabilise l'echec plutot
+                # que de le passer sous silence, pour que l'utilisateur
+                # comprenne un taux de reduction plus faible que prevu.
                 continue
         page.compress_content_streams()
     _write_output(writer, output_path)
@@ -226,6 +255,19 @@ def compress_pdf(
 
 
 # -- conversion image <-> PDF ---------------------------------------------------
+
+# Au-dela de ce nombre de pixels, le bitmap resultant risque a lui seul
+# d'epuiser plusieurs Go de RAM avant meme d'avoir fini d'etre alloue. Un
+# /MediaBox demesure (parfaitement valide au sens de la specification PDF,
+# et ne pesant que quelques centaines d'octets sur disque) combine a un DPI
+# eleve peut demander un bitmap non compresse de plusieurs Go - vecteur de
+# deni de service trouve a l'audit, qui ne necessite meme pas d'image
+# embarquee (juste une page qui se declare tres grande). 100 megapixels
+# correspond a une image d'environ 10000x10000 px (ex : une page A4 a plus
+# de 1700 DPI, ou une page de 66x66 pouces a 150 DPI) - tres largement
+# au-dela de tout usage documentaire raisonnable.
+MAX_RENDER_PIXELS = 100_000_000
+
 
 def pdf_to_images(
     input_path: Path, output_dir: Path, base_name: str, dpi: int = 150, fmt: str = "png",
@@ -269,6 +311,23 @@ def pdf_to_images(
     try:
         total = len(pdf)
         for index, page in enumerate(pdf, start=1):
+            # Verifie la taille attendue du bitmap AVANT de tenter l'allocation
+            # (page.render) : une page a /MediaBox demesure combinee a un DPI
+            # eleve peut demander plusieurs Go de RAM pour une seule image, y
+            # compris sur un fichier PDF de quelques centaines d'octets sur
+            # disque (voir MAX_RENDER_PIXELS ci-dessus).
+            width_pt, height_pt = page.get_size()
+            expected_pixels = (width_pt * scale) * (height_pt * scale)
+            if expected_pixels > MAX_RENDER_PIXELS:
+                page.close()
+                raise PdfOpsError(
+                    f"La page {index} de {Path(input_path).name} produirait une image "
+                    f"d'environ {expected_pixels / 1_000_000:.0f} megapixels a {dpi} DPI "
+                    f"(page de {width_pt / 72:.0f}x{height_pt / 72:.0f} pouces), ce qui "
+                    f"depasse la limite de {MAX_RENDER_PIXELS // 1_000_000} megapixels et "
+                    "risquerait d'epuiser la memoire disponible. Reduisez la resolution (DPI) "
+                    "ou verifiez que ce PDF n'est pas corrompu ou malveillant."
+                )
             bitmap = page.render(scale=scale)
             image = bitmap.to_pil()
             bitmap.close()
@@ -605,6 +664,13 @@ def extract_embedded_images(
                 used_paths.add(output_path)
                 save_image.save(output_path)
                 output_paths.append(output_path)
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, PyPdfError):
+                # PyPdfError couvre notamment LimitReachedError, la
+                # protection anti-bombe-de-decompression native de pypdf
+                # (image declarant des dimensions demesurees pour un flux
+                # minuscule) - absente jusqu'a present de cet except, elle
+                # remontait telle quelle et faisait echouer toute
+                # l'extraction du document au lieu de sauter uniquement
+                # l'image fautive (bug trouve a l'audit).
                 continue
     return output_paths

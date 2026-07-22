@@ -6,6 +6,7 @@ extraction de texte."""
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -66,6 +67,54 @@ def make_pdf_with_corrupt_and_valid_images(path: Path) -> Path:
     return path
 
 
+def _add_bomb_image_xobject(writer: PdfWriter, page, name: str):
+    """Ajoute un XObject image "bombe de decompression" : dimensions
+    declarees enormes (20000x20000, DeviceGray 8 bits) pour un flux
+    /FlateDecode minuscule sur disque. Reproduit le mecanisme reel de
+    protection anti-bombe de pypdf (pypdf.errors.LimitReachedError, levee
+    car le bitmap declare depasse FLATE_MAX_BUFFER_SIZE), utilise a l'audit
+    pour prouver qu'une seule image de ce type faisait jusque-la avorter
+    toute la compression/extraction du document."""
+    image_obj = StreamObject()
+    image_obj.set_data(zlib.compress(b"\x00" * 100))
+    image_obj[NameObject("/Type")] = NameObject("/XObject")
+    image_obj[NameObject("/Subtype")] = NameObject("/Image")
+    image_obj[NameObject("/Width")] = NumberObject(20000)
+    image_obj[NameObject("/Height")] = NumberObject(20000)
+    image_obj[NameObject("/ColorSpace")] = NameObject("/DeviceGray")
+    image_obj[NameObject("/BitsPerComponent")] = NumberObject(8)
+    image_obj[NameObject("/Filter")] = NameObject("/FlateDecode")
+    ref = writer._add_object(image_obj)
+    if "/Resources" not in page:
+        page[NameObject("/Resources")] = DictionaryObject()
+    resources = page["/Resources"].get_object()
+    if "/XObject" not in resources:
+        resources[NameObject("/XObject")] = DictionaryObject()
+    resources["/XObject"].get_object()[NameObject(name)] = ref
+
+
+def make_pdf_with_bomb_and_valid_images(path: Path) -> Path:
+    """PDF de 2 pages : la page 1 contient une image "bombe de
+    decompression" (voir _add_bomb_image_xobject), la page 2 une vraie image
+    JPEG valide - pour verifier qu'une image-bombe n'empeche jamais de
+    traiter les images valides qui la suivent."""
+    import io
+
+    writer = PdfWriter()
+
+    bomb_page = writer.add_blank_page(width=200, height=200)
+    _add_bomb_image_xobject(writer, bomb_page, "/BombImg")
+
+    valid_page = writer.add_blank_page(width=200, height=200)
+    buffer = io.BytesIO()
+    Image.new("RGB", (10, 10), color=(200, 20, 20)).save(buffer, format="JPEG")
+    _add_dct_image_xobject(writer, valid_page, "/ValidImg", buffer.getvalue(), 10, 10)
+
+    with open(path, "wb") as f:
+        writer.write(f)
+    return path
+
+
 def make_pdf(path: Path, num_pages: int = 1, labels=None) -> Path:
     """Cree un PDF de test avec un texte distinct par page, pour verifier
     l'ordre/le contenu apres une operation."""
@@ -101,6 +150,43 @@ class PdfOpsTestCase(unittest.TestCase):
         with self.assertRaises(ops.PdfOpsError):
             ops.get_page_count(protected)
         self.assertEqual(ops.get_page_count(protected, password="secret"), 2)
+
+    def test_owner_only_protected_pdf_opens_without_a_password(self):
+        # Regression trouvee a l'audit : un PDF protege uniquement par un
+        # mot de passe "proprietaire" (permissions restreintes copier/
+        # imprimer...) mais sans mot de passe d'ouverture reel (mot de passe
+        # utilisateur vide) - categorie tres courante (exports
+        # administratifs/bancaires) - se voyait pourtant systematiquement
+        # reclamer un mot de passe qui n'existe pas, bloquant tout l'outil
+        # sur ce fichier alors qu'il s'ouvre nativement partout ailleurs
+        # (Adobe Acrobat, navigateurs...).
+        pdf = make_pdf(self.tmp / "a.pdf", num_pages=2, labels=["Un", "Deux"])
+        writer = PdfWriter()
+        writer.append(PdfReader(str(pdf)))
+        writer.encrypt(user_password="", owner_password="secretowner", algorithm="AES-256")
+        owner_only = self.tmp / "owner_only.pdf"
+        with open(owner_only, "wb") as f:
+            writer.write(f)
+
+        reader = PdfReader(str(owner_only))
+        self.assertTrue(reader.is_encrypted)
+
+        # Aucun mot de passe fourni : doit s'ouvrir directement, sans lever
+        # PdfOpsError ni exiger quoi que ce soit de l'utilisateur.
+        self.assertEqual(ops.get_page_count(owner_only), 2)
+        texts = ops.extract_text(owner_only)
+        self.assertIn("Un", texts[0])
+        self.assertIn("Deux", texts[1])
+
+    def test_owner_only_protected_pdf_still_rejects_a_genuinely_wrong_password(self):
+        # L'essai automatique du mot de passe vide ne doit pas masquer un
+        # vrai mot de passe utilisateur incorrect sur un PDF qui, lui, en
+        # possede reellement un.
+        pdf = make_pdf(self.tmp / "a.pdf", num_pages=1)
+        protected = self.tmp / "protected.pdf"
+        ops.set_password(pdf, protected, user_password="secret")
+        with self.assertRaises(ops.PdfOpsError):
+            ops.get_page_count(protected, password="wrong")
 
     def test_saving_output_over_the_source_file_does_not_corrupt_it(self):
         # Scenario reel : l'utilisateur choisit d'ecraser le fichier
@@ -266,6 +352,25 @@ class PdfOpsTestCase(unittest.TestCase):
         self.assertEqual(result.images_recompressed, 0)
         self.assertEqual(result.images_failed, 1)
 
+    def test_compress_pdf_skips_a_decompression_bomb_image_without_aborting_the_file(self):
+        # Regression trouvee a l'audit : compress_pdf bouclait directement
+        # `for img in page.images`, ce qui declenche le decodage AVANT le
+        # try/except qui suit - une seule image "bombe" (dimensions
+        # declarees enormes, flux minuscule) faisait donc lever
+        # pypdf.errors.LimitReachedError hors de toute protection,
+        # avortant la compression de TOUT le fichier au lieu de continuer
+        # sur les images/pages saines suivantes.
+        pdf = make_pdf_with_bomb_and_valid_images(self.tmp / "bomb.pdf")
+        output = self.tmp / "compressed.pdf"
+
+        result = ops.compress_pdf(pdf, output, image_quality=40, max_dimension=300)
+
+        self.assertTrue(output.exists())
+        self.assertEqual(ops.get_page_count(output), 2)  # les 2 pages sont bien presentes
+        self.assertEqual(result.images_total, 2)  # bombe + image valide, toutes deux comptees
+        self.assertEqual(result.images_recompressed, 1)  # seule l'image valide a pu etre recompressee
+        self.assertEqual(result.images_failed, 1)
+
     def test_compression_result_images_failed_counts_unrecompressed_images(self):
         result = ops.CompressionResult(original_size=100, compressed_size=90, images_recompressed=2, images_total=5)
         self.assertEqual(result.images_failed, 3)
@@ -358,6 +463,36 @@ class PdfOpsTestCase(unittest.TestCase):
         with self.assertRaises(ops.PdfOpsError):
             ops.pdf_to_images(protected, self.tmp / "images", "doc", dpi=72, fmt="png", password="wrong")
 
+    def test_pdf_to_images_refuses_an_oversized_mediabox_before_rendering(self):
+        # Regression trouvee a l'audit : pdf_to_images calculait le scale
+        # puis appelait directement page.render() sans jamais verifier au
+        # prealable la taille du bitmap resultant. Un /MediaBox demesure
+        # (parfaitement valide au sens de la specification PDF, ne pesant
+        # que quelques centaines d'octets sur disque) combine a un DPI
+        # meme modere peut demander plusieurs Go de RAM pour une seule
+        # image - vecteur de deni de service qui ne necessite aucune image
+        # embarquee, juste une page qui se declare tres grande.
+        writer = PdfWriter()
+        writer.add_blank_page(width=100000, height=100000)  # ~1389x1389 pouces
+        huge = self.tmp / "huge_mediabox.pdf"
+        with open(huge, "wb") as f:
+            writer.write(f)
+        out_dir = self.tmp / "images"
+
+        with self.assertRaises(ops.PdfOpsError):
+            ops.pdf_to_images(huge, out_dir, "huge", dpi=72, fmt="png")
+        # Le refus intervient avant tout rendu : aucune image n'est produite.
+        self.assertEqual(list(out_dir.iterdir()), [])
+
+    def test_pdf_to_images_accepts_a_reasonable_mediabox_and_dpi(self):
+        # Garde-fou de non-regression : une page de taille standard a un DPI
+        # eleve mais raisonnable ne doit pas etre refusee par la nouvelle
+        # limite de pixels.
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)  # page 200x200 points (~2.8x2.8 pouces)
+        image_paths = ops.pdf_to_images(pdf, self.tmp / "images", "doc", dpi=300, fmt="png")
+        self.assertEqual(len(image_paths), 1)
+        self.assertTrue(image_paths[0].exists())
+
     def test_extract_embedded_images_recovers_the_embedded_photo(self):
         source_image = self.tmp / "photo.png"
         Image.new("RGB", (40, 30), color=(10, 20, 30)).save(source_image)
@@ -389,6 +524,21 @@ class PdfOpsTestCase(unittest.TestCase):
         # page.images lui-meme, avant meme le try:), abandonnant aussi les
         # images valides des pages suivantes.
         pdf = make_pdf_with_corrupt_and_valid_images(self.tmp / "doc.pdf")
+        extracted = ops.extract_embedded_images(pdf, self.tmp / "out", "doc")
+        self.assertEqual(len(extracted), 1)
+        self.assertIn("p002", extracted[0].name)  # l'image valide de la page 2 est bien recuperee
+        with Image.open(extracted[0]) as img:
+            self.assertEqual(img.size, (10, 10))
+
+    def test_extract_embedded_images_skips_a_decompression_bomb_image_without_aborting_the_rest(self):
+        # Regression trouvee a l'audit : contrairement au cas "image
+        # corrompue" ci-dessus, l'indexation manuelle etait deja correcte
+        # ici, mais l'except (OSError, ValueError, KeyError) ne couvrait pas
+        # pypdf.errors.LimitReachedError (la protection anti-bombe de
+        # decompression native de pypdf, qui herite de PyPdfError -> Exception,
+        # pas de ces trois-la) - une image "bombe" faisait donc quand meme
+        # avorter toute l'extraction du document.
+        pdf = make_pdf_with_bomb_and_valid_images(self.tmp / "bomb.pdf")
         extracted = ops.extract_embedded_images(pdf, self.tmp / "out", "doc")
         self.assertEqual(len(extracted), 1)
         self.assertIn("p002", extracted[0].name)  # l'image valide de la page 2 est bien recuperee
