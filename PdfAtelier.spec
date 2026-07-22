@@ -45,4 +45,10 @@ exe = EXE(
     # gui.py (_configure_dpi_awareness), qui reste un filet de securite pour
     # une execution depuis le code source (non empaquetee).
     manifest='PdfAtelier.manifest',
+    # Correctif audit dimension 20 : embarque des metadonnees de version
+    # Windows (FileVersion/ProductVersion/CompanyName/FileDescription/...)
+    # dans l'executable, absentes auparavant (onglet "Details" des proprietes
+    # Windows entierement vide) - voir version_info.txt pour le detail et la
+    # procedure de mise a jour a chaque nouvelle version.
+    version='version_info.txt',
 )

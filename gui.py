@@ -28,6 +28,16 @@ RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 PDF_FILETYPES = [("Fichiers PDF", "*.pdf")]
 IMAGE_FILETYPES = [("Images", "*.png *.jpg *.jpeg *.bmp *.tiff")]
 
+# Point 45 de l'audit : rien n'avertissait avant de lancer un traitement par
+# lot ou une conversion PDF->images dont la duree previsible se compte en
+# minutes - la barre de progression (deja en place) n'informe qu'UNE FOIS le
+# traitement deja lance. Seuils volontairement genereux (pas de blocage sur
+# un usage normal), juste un signal avant de s'engager sur un traitement
+# potentiellement long, avec la possibilite d'annuler pour ajuster ses
+# reglages.
+LARGE_BATCH_FILE_THRESHOLD = 30
+LARGE_CONVERSION_PAGE_THRESHOLD = 300
+
 
 def _resource_path(relative: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -41,6 +51,21 @@ def _format_size(num_bytes: int) -> str:
             return f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} Go"
+
+
+def _compression_ratio_phrase(ratio: float) -> str:
+    """Formule le taux de compression pour affichage (dimension 15 de
+    l'audit) : CompressionResult.ratio_percent n'a pas de plancher a zero -
+    si la recompression produit un fichier PLUS gros que l'original (PDF
+    deja bien optimise, ou reglages qualite/dimension plus genereux que
+    l'original), `ratio` est negatif. Le gabarit brut ("{ratio} % de
+    reduction") restait alors grammaticalement une "reduction" malgre un
+    nombre negatif (ex: "-12.3 % de reduction"), confus pour un lecteur non
+    technique. Reformule explicitement le cas negatif plutot que d'afficher
+    tel quel un pourcentage negatif a cote du mot "reduction"."""
+    if ratio < 0:
+        return f"le fichier a legerement grossi (+{abs(ratio):g} %) - le PDF source etait deja bien optimise"
+    return f"{ratio:g} % de reduction au total"
 
 
 _dpi_awareness_configured = False
@@ -116,6 +141,15 @@ class PdfAtelierApp:
         # lisibles et cliquables.
         self.root.minsize(1020, 680)
 
+        # Cache d'un seul PdfDocument pdfium a la fois, voir
+        # _get_cached_pdfium_document (dimension 37 de l'audit) - ferme
+        # explicitement a la fermeture de la fenetre (_on_close ci-dessous)
+        # pour ne jamais laisser un fichier PDF verrouille plus longtemps
+        # que necessaire.
+        self._pdfium_cache_key = None
+        self._pdfium_cache_doc = None
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
         icon_path = _resource_path("icon.ico")
         if icon_path.exists():
             try:
@@ -172,6 +206,14 @@ class PdfAtelierApp:
         self._build_protect_tab()
         self._build_text_tab()
         self._build_properties_tab()
+
+    def _on_close(self):
+        """Gestionnaire de fermeture de la fenetre principale (bouton X) :
+        libere explicitement le document pdfium mis en cache (dimension 37
+        de l'audit) avant de detruire la fenetre, plutot que de compter sur
+        le ramasse-miettes Python pour le faire a un moment indetermine."""
+        self._close_cached_pdfium_document()
+        self.root.destroy()
 
     def _poll_update_check(self):
         try:
@@ -278,22 +320,62 @@ class PdfAtelierApp:
             )
         return True
 
-    @staticmethod
-    def _render_pdf_page_image(path, password, page_number: int, rotation: int = 0, scale: float = 0.6):
-        """Rendu d'une page en image PIL, reutilise par l'apercu de l'onglet
-        Pages et par l'apercu avant fusion."""
+    def _get_cached_pdfium_document(self, path, password):
+        """Reutilise le PdfDocument pdfium deja ouvert pour CE fichier/mot
+        de passe plutot que d'en rouvrir un nouveau a chaque appel
+        (dimension 37 de l'audit) : `_render_pdf_page_image` est appelee a
+        CHAQUE clic sur une page dans les onglets Fusionner/Pages/Diviser
+        (apercu) - sans ce cache, chaque clic pour previsualiser une page
+        differente du MEME fichier rouvrait et refermait tout le document
+        pdfium, un surcout evitable et perceptible sur un gros PDF local en
+        cas de navigation rapide entre plusieurs pages. Invalide (ferme
+        l'ancien, ouvre le nouveau) des que le fichier ou le mot de passe
+        change - un seul document reste en cache a la fois, suffisant pour
+        le cas d'usage vise (naviguer dans les pages du fichier en cours
+        d'apercu)."""
         import pypdfium2 as pdfium
 
-        pdf = pdfium.PdfDocument(str(path), password=password)
+        key = (str(Path(path).resolve()), password)
+        if self._pdfium_cache_key == key and self._pdfium_cache_doc is not None:
+            return self._pdfium_cache_doc
+
+        self._close_cached_pdfium_document()
+        doc = pdfium.PdfDocument(str(path), password=password)
+        self._pdfium_cache_key = key
+        self._pdfium_cache_doc = doc
+        return doc
+
+    def _close_cached_pdfium_document(self):
+        """Libere le document pdfium mis en cache (voir
+        _get_cached_pdfium_document), s'il y en a un - appele avant d'en
+        ouvrir un autre et a la fermeture de l'application, pour ne jamais
+        laisser un fichier PDF verrouille par un handle pdfium encore
+        ouvert plus longtemps que necessaire."""
+        if self._pdfium_cache_doc is not None:
+            try:
+                self._pdfium_cache_doc.close()
+            except Exception:
+                pass
+        self._pdfium_cache_doc = None
+        self._pdfium_cache_key = None
+
+    def _render_pdf_page_image(self, path, password, page_number: int, rotation: int = 0, scale: float = 0.6):
+        """Rendu d'une page en image PIL, reutilise par l'apercu de l'onglet
+        Pages, l'apercu avant fusion et le selecteur visuel de Diviser.
+        S'appuie sur `_get_cached_pdfium_document` (dimension 37 de
+        l'audit) : seuls la page et le bitmap rendus sont fermes ici, le
+        PdfDocument lui-meme reste ouvert en cache pour les appels suivants
+        sur le meme fichier."""
+        pdf = self._get_cached_pdfium_document(path, password)
+        page = pdf[page_number - 1]
         try:
-            page = pdf[page_number - 1]
             bitmap = page.render(scale=scale)
-            image = bitmap.to_pil().rotate(-rotation, expand=True)
-            bitmap.close()
-            page.close()
-            return image
+            try:
+                return bitmap.to_pil().rotate(-rotation, expand=True)
+            finally:
+                bitmap.close()
         finally:
-            pdf.close()
+            page.close()
 
     @staticmethod
     def _move_listbox_selection(listbox, items: list, delta: int):
@@ -451,6 +533,17 @@ class PdfAtelierApp:
                 return None
             return [(sources[0], output)]
 
+        # Point 45 de l'audit : avertir avant de s'engager dans un lot dont
+        # la duree previsible se compte probablement en minutes, avec la
+        # possibilite d'annuler pour reduire le lot ou ajuster ses reglages -
+        # voir LARGE_BATCH_FILE_THRESHOLD.
+        if len(sources) > LARGE_BATCH_FILE_THRESHOLD and not messagebox.askyesno(
+            APP_TITLE,
+            f"Ce traitement porte sur {len(sources)} fichiers, cela peut prendre plusieurs minutes. "
+            "Continuer ?",
+        ):
+            return None
+
         output_dir = filedialog.askdirectory(title="Dossier de destination")
         if not output_dir:
             return None
@@ -487,6 +580,13 @@ class PdfAtelierApp:
                 return None
         return pairs
 
+    # Point 44 de l'audit : au-dela de ce nombre d'echecs CONSECUTIFS
+    # portant le meme message (ex: disque plein, dossier de destination
+    # supprime en cours de route), le reste du lot est presque certainement
+    # voue au meme sort - continuer produirait un resume de plusieurs
+    # dizaines de lignes quasi identiques sans jamais le signaler comme tel.
+    CONSECUTIVE_IDENTICAL_FAILURE_LIMIT = 3
+
     def _run_batch(self, pairs: list, action_for_pair, report=None):
         """Execute action_for_pair(source, output) pour chaque paire, sans
         jamais interrompre les autres fichiers sur l'echec de l'un (chaque
@@ -499,20 +599,48 @@ class PdfAtelierApp:
         alimenter la barre de progression quand ce lot tourne dans un thread
         separe (voir _run_in_background_with_progress). Ne touche jamais a
         Tkinter directement ici : cette methode peut donc s'executer aussi
-        bien sur le thread principal (comme avant) que sur un thread worker."""
+        bien sur le thread principal (comme avant) que sur un thread worker.
+
+        Interrompt le lot plus tot si CONSECUTIVE_IDENTICAL_FAILURE_LIMIT
+        echecs consecutifs affichent EXACTEMENT le meme message (point 44 de
+        l'audit, ex: panne systemique type disque plein) : une derniere
+        entree de synthese est ajoutee a `failures` pour l'expliquer,
+        plutot que de laisser chaque fichier restant echouer individuellement
+        avec le meme message deja vu."""
         successes, failures = [], []
         total = len(pairs)
+        last_failure_message = None
+        consecutive_identical_failures = 0
         for index, (source, output) in enumerate(pairs, start=1):
+            message = None
             try:
                 result = action_for_pair(source, output)
             except ops.PdfOpsError as exc:
-                failures.append((source, str(exc)))
+                message = str(exc)
+                failures.append((source, message))
             except Exception as exc:
-                failures.append((source, f"erreur inattendue : {exc}"))
+                message = f"erreur inattendue : {exc}"
+                failures.append((source, message))
             else:
                 successes.append((source, output, result))
             if report:
                 report(index, total, source.name)
+
+            if message is not None and message == last_failure_message:
+                consecutive_identical_failures += 1
+            else:
+                consecutive_identical_failures = 1 if message is not None else 0
+            last_failure_message = message
+
+            if consecutive_identical_failures >= self.CONSECUTIVE_IDENTICAL_FAILURE_LIMIT:
+                remaining = total - index
+                if remaining > 0:
+                    failures.append((
+                        Path("(reste du lot)"),
+                        f"lot interrompu apres {consecutive_identical_failures} echecs identiques "
+                        f"consecutifs (\"{message}\") - {remaining} fichier(s) restant(s) non traite(s)",
+                    ))
+                break
         return successes, failures
 
     def _show_batch_summary(self, successes: list, failures: list, verb: str, extra_note: Optional[str] = None):
@@ -1097,16 +1225,22 @@ class PdfAtelierApp:
         self.compress_max_dim_var = IntVar(value=1600)
         self.compress_result_var = StringVar(value="")
 
+        # Point 17 de l'audit : contrairement a Fusionner/Pages (dont la
+        # liste occupe tout l'espace vertical disponible via fill=BOTH,
+        # expand=True), cette liste restait figee a une hauteur de 5 lignes
+        # meme sur une grande fenetre, laissant une vaste zone grise
+        # inutilisee en dessous - incoherence purement visuelle entre
+        # onglets, corrigee en reprenant le meme motif d'extension.
         top = ttk.Frame(frame)
-        top.pack(fill=X, padx=10, pady=10)
-        self.compress_listbox = ttk_listbox(top, height=5)
-        self.compress_listbox.pack(side=LEFT, fill=X, expand=True)
+        top.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        self.compress_listbox = ttk_listbox(top)
+        self.compress_listbox.pack(side=LEFT, fill=BOTH, expand=True)
         self._register_pdf_drop(
             self.compress_listbox, self.compress_sources,
             lambda: self._reload_listbox(self.compress_listbox, self.compress_sources), self.compress_passwords,
         )
         buttons = ttk.Frame(top)
-        buttons.pack(side=LEFT, padx=(10, 0))
+        buttons.pack(side=LEFT, fill=Y, padx=(10, 0))
         ttk.Button(buttons, text="Ajouter...", command=self._compress_add_files).pack(fill=X, pady=2)
         ttk.Button(buttons, text="Retirer", command=self._compress_remove_selected).pack(fill=X, pady=2)
         ttk.Button(buttons, text="Vider", command=self._compress_clear).pack(fill=X, pady=2)
@@ -1176,7 +1310,7 @@ class PdfAtelierApp:
                 ratio = round(100 * (1 - total_compressed / total_original), 1) if total_original else 0.0
                 summary = (
                     f"{_format_size(total_original)} -> {_format_size(total_compressed)} "
-                    f"({ratio:g} % de reduction au total)"
+                    f"({_compression_ratio_phrase(ratio)})"
                 )
                 # Le mode fichier unique affiche deja les echecs de
                 # recompression d'image individuelle (CompressionResult.
@@ -1275,6 +1409,19 @@ class PdfAtelierApp:
             text="Recupere les fichiers embarques (XML de facture electronique, images, autres PDF...).",
             foreground="#666",
         ).pack(anchor="w", padx=5)
+        # Point 12 de l'audit : PdfAtelier n'ouvre jamais lui-meme les
+        # pieces jointes extraites (bon reflexe deja en place), mais rien
+        # n'avertissait l'utilisateur qui les ouvrirait ensuite MANUELLEMENT
+        # depuis l'Explorateur (ex: un executable deguise en ".pdf.exe" ou
+        # une macro Office) - rappel explicite avant l'action, dans le meme
+        # esprit que la mise en garde des navigateurs sur les telechargements
+        # potentiellement dangereux.
+        ttk.Label(
+            extract_att,
+            text="Verifiez la provenance du PDF avant d'ouvrir les fichiers extraits : ils peuvent "
+            "contenir du contenu actif (macros, executables).",
+            foreground="#8a5a00",
+        ).pack(anchor="w", padx=5)
         ttk.Button(extract_att, text="Extraire les pieces jointes...", command=self._eea_run).pack(anchor="w", padx=5, pady=5)
 
         img_to_pdf = ttk.LabelFrame(frame, text="Images vers PDF")
@@ -1338,6 +1485,28 @@ class PdfAtelierApp:
             messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
             return
         password = self.p2i_password_var.get() or ""
+
+        # Point 45 de l'audit : avertir avant de lancer la conversion d'un
+        # document de tres nombreuses pages (potentiellement plusieurs
+        # minutes, surtout a haute resolution) - lecture rapide et
+        # synchrone du nombre de pages (deja mesuree a l'audit : de l'ordre
+        # de la seconde meme sur un PDF de plusieurs milliers de pages),
+        # acceptable ici puisqu'elle precede l'ouverture de la fenetre de
+        # progression. Echec silencieux (mot de passe incorrect, fichier
+        # illisible...) : l'erreur reelle et son message clair surviendront
+        # de toute facon au lancement du traitement ci-dessous, pas la peine
+        # de la dupliquer ici.
+        try:
+            page_count = ops.get_page_count(self.p2i_source_path, password=password)
+        except Exception:
+            page_count = None
+        if page_count is not None and page_count > LARGE_CONVERSION_PAGE_THRESHOLD:
+            if not messagebox.askyesno(
+                APP_TITLE,
+                f"Ce document compte {page_count} pages, la conversion peut prendre plusieurs minutes. "
+                "Continuer ?",
+            ):
+                return
 
         # La conversion PDF->images peut prendre du temps sur un document de
         # nombreuses pages/haute resolution : execute dans un thread separe
@@ -1467,16 +1636,19 @@ class PdfAtelierApp:
         self.watermark_angle_var = IntVar(value=45)
         self.watermark_size_var = IntVar(value=40)
 
+        # Point 17 de l'audit : meme correctif d'extension verticale que
+        # Compresser (voir son commentaire) - liste multi-fichiers coherente
+        # avec Fusionner/Pages sur grande fenetre.
         top = ttk.Frame(frame)
-        top.pack(fill=X, padx=10, pady=10)
-        self.watermark_listbox = ttk_listbox(top, height=5)
-        self.watermark_listbox.pack(side=LEFT, fill=X, expand=True)
+        top.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        self.watermark_listbox = ttk_listbox(top)
+        self.watermark_listbox.pack(side=LEFT, fill=BOTH, expand=True)
         self._register_pdf_drop(
             self.watermark_listbox, self.watermark_sources,
             lambda: self._reload_listbox(self.watermark_listbox, self.watermark_sources), self.watermark_passwords,
         )
         buttons = ttk.Frame(top)
-        buttons.pack(side=LEFT, padx=(10, 0))
+        buttons.pack(side=LEFT, fill=Y, padx=(10, 0))
         ttk.Button(buttons, text="Ajouter...", command=self._watermark_add_files).pack(fill=X, pady=2)
         ttk.Button(buttons, text="Retirer", command=self._watermark_remove_selected).pack(fill=X, pady=2)
         ttk.Button(buttons, text="Vider", command=self._watermark_clear).pack(fill=X, pady=2)
@@ -1551,17 +1723,19 @@ class PdfAtelierApp:
         self.page_numbers_format_var = StringVar(value="{page} / {total}")
         self.page_numbers_size_var = IntVar(value=10)
 
+        # Point 17 de l'audit : meme correctif d'extension verticale que
+        # Compresser (voir son commentaire).
         top = ttk.Frame(frame)
-        top.pack(fill=X, padx=10, pady=10)
-        self.page_numbers_listbox = ttk_listbox(top, height=5)
-        self.page_numbers_listbox.pack(side=LEFT, fill=X, expand=True)
+        top.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        self.page_numbers_listbox = ttk_listbox(top)
+        self.page_numbers_listbox.pack(side=LEFT, fill=BOTH, expand=True)
         self._register_pdf_drop(
             self.page_numbers_listbox, self.page_numbers_sources,
             lambda: self._reload_listbox(self.page_numbers_listbox, self.page_numbers_sources),
             self.page_numbers_passwords,
         )
         buttons = ttk.Frame(top)
-        buttons.pack(side=LEFT, padx=(10, 0))
+        buttons.pack(side=LEFT, fill=Y, padx=(10, 0))
         ttk.Button(buttons, text="Ajouter...", command=self._page_numbers_add_files).pack(fill=X, pady=2)
         ttk.Button(buttons, text="Retirer", command=self._page_numbers_remove_selected).pack(fill=X, pady=2)
         ttk.Button(buttons, text="Vider", command=self._page_numbers_clear).pack(fill=X, pady=2)
@@ -1658,16 +1832,18 @@ class PdfAtelierApp:
         self.protect_password_var = StringVar()
         self.protect_confirm_var = StringVar()
 
+        # Point 17 de l'audit : meme correctif d'extension verticale que
+        # Compresser (voir son commentaire).
         top = ttk.Frame(frame)
-        top.pack(fill=X, padx=10, pady=10)
-        self.protect_listbox = ttk_listbox(top, height=5)
-        self.protect_listbox.pack(side=LEFT, fill=X, expand=True)
+        top.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        self.protect_listbox = ttk_listbox(top)
+        self.protect_listbox.pack(side=LEFT, fill=BOTH, expand=True)
         self._register_pdf_drop(
             self.protect_listbox, self.protect_sources,
             lambda: self._reload_listbox(self.protect_listbox, self.protect_sources), prompt_password=False,
         )
         buttons = ttk.Frame(top)
-        buttons.pack(side=LEFT, padx=(10, 0))
+        buttons.pack(side=LEFT, fill=Y, padx=(10, 0))
         ttk.Button(buttons, text="Ajouter...", command=self._protect_add_files).pack(fill=X, pady=2)
         ttk.Button(buttons, text="Retirer", command=self._protect_remove_selected).pack(fill=X, pady=2)
         ttk.Button(buttons, text="Vider", command=self._protect_clear).pack(fill=X, pady=2)

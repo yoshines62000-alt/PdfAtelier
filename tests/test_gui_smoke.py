@@ -85,6 +85,22 @@ def find_button(widget, text):
     return None
 
 
+def find_label_containing(widget, substring):
+    """Retrouve un ttk.Label dont le texte contient `substring`, meme
+    principe que find_button (aucun de ces labels n'est conserve comme
+    attribut de PdfAtelierApp)."""
+    for child in widget.winfo_children():
+        try:
+            if child.winfo_class() in ("TLabel", "Label") and substring in child.cget("text"):
+                return child
+        except Exception:
+            pass
+        found = find_label_containing(child, substring)
+        if found is not None:
+            return found
+    return None
+
+
 def pump(root, predicate, timeout=30.0):
     """Fait tourner manuellement la boucle d'evenements Tk (root.update())
     jusqu'a ce que `predicate()` devienne vrai ou que `timeout` (secondes)
@@ -162,6 +178,19 @@ class GuiSmokeTestCase(unittest.TestCase):
                 self.root.after_cancel(after_id)
             except Exception:
                 pass
+        # Ferme explicitement le document pdfium eventuellement mis en
+        # cache par un test d'apercu (voir _get_cached_pdfium_document,
+        # dimension 37 de l'audit) AVANT `self.tmp_dir.cleanup()` : compter
+        # sur le ramasse-miettes seul (comme pour les StringVar ci-dessous)
+        # n'est PAS suffisant ici - contrairement a une StringVar, un
+        # PdfDocument pdfium retient un vrai verrou de fichier Windows, et
+        # son moment de liberation par le GC n'est pas assez deterministe
+        # pour garantir qu'il ait deja eu lieu au moment ou `tmp_dir.
+        # cleanup()` tente de supprimer le meme fichier juste apres (observe
+        # empiriquement : PermissionError intermittente sur `shutil.rmtree`
+        # sans cet appel explicite).
+        if hasattr(self, "app"):
+            self.app._close_cached_pdfium_document()
         # `self.app` retient des dizaines de StringVar/IntVar/BooleanVar (une
         # par onglet/champ) qui gardent chacune une reference a l'interprete
         # Tcl de `self.root`. Sans ce `del` + `gc.collect()` explicites AVANT
@@ -562,6 +591,16 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertEqual(len(self.info_messages), 1)
         self.assertIn("1 piece(s) jointe(s)", self.info_messages[0])
 
+    def test_attachments_tab_warns_before_opening_extracted_files(self):
+        # Point 12 de l'audit : PdfAtelier n'ouvre jamais lui-meme les
+        # pieces jointes extraites, mais rien n'avertissait l'utilisateur
+        # qui les ouvrirait ensuite MANUELLEMENT (executable deguise,
+        # macro...) - un rappel explicite doit etre visible dans l'onglet
+        # avant meme de lancer l'extraction.
+        label = find_label_containing(self.app.convert_tab, "Verifiez la provenance du PDF")
+        self.assertIsNotNone(label)
+        self.assertIn("contenu actif", label.cget("text"))
+
     def test_text_extraction_run_in_background(self):
         src = make_pdf(self.tmp / "texte.pdf", num_pages=2, labels=["Bonjour", "Au revoir"])
         self.app.text_source_path = src
@@ -614,6 +653,213 @@ class GuiSmokeTestCase(unittest.TestCase):
         # inaccessibles (ex: onglet Compresser a 480x320) - bug trouve a
         # l'audit, reproductible a 100% sur un simple redimensionnement.
         self.assertEqual(self.root.minsize(), (1020, 680))
+
+    # -- Coherence de mise en page entre onglets (point 17 de l'audit) -------------
+
+    def test_batch_listboxes_expand_to_fill_available_vertical_space(self):
+        # Contrairement a Fusionner/Pages (fill=BOTH, expand=True), les
+        # listes de Compresser/Filigrane/Numeroter/Protection restaient a
+        # une hauteur fixe de 5 lignes meme sur une grande fenetre -
+        # incoherence purement visuelle corrigee en alignant leur
+        # configuration de pack() sur celle de Fusionner/Pages.
+        for listbox in (
+            self.app.compress_listbox,
+            self.app.watermark_listbox,
+            self.app.page_numbers_listbox,
+            self.app.protect_listbox,
+        ):
+            info = listbox.pack_info()
+            self.assertEqual(info["fill"], "both")
+            self.assertEqual(int(info["expand"]), 1)
+
+    # -- Cache du document pdfium pour l'apercu (point 37 de l'audit) --------------
+
+    def test_render_pdf_page_image_reuses_the_cached_pdfium_document(self):
+        src = make_pdf(self.tmp / "apercu.pdf", num_pages=2)
+
+        self.app._render_pdf_page_image(src, None, 1)
+        first_doc = self.app._pdfium_cache_doc
+        self.assertIsNotNone(first_doc)
+
+        # Meme fichier/mot de passe : le document pdfium ne doit pas etre
+        # rouvert (meme objet reutilise), contrairement au comportement
+        # d'avant le correctif (nouveau PdfDocument a CHAQUE appel).
+        self.app._render_pdf_page_image(src, None, 2)
+        self.assertIs(self.app._pdfium_cache_doc, first_doc)
+
+    def test_render_pdf_page_image_invalidates_cache_on_file_change(self):
+        src_a = make_pdf(self.tmp / "a.pdf", num_pages=1)
+        src_b = make_pdf(self.tmp / "b.pdf", num_pages=1)
+
+        self.app._render_pdf_page_image(src_a, None, 1)
+        doc_a = self.app._pdfium_cache_doc
+
+        self.app._render_pdf_page_image(src_b, None, 1)
+        doc_b = self.app._pdfium_cache_doc
+
+        self.assertIsNot(doc_a, doc_b)
+
+    def test_close_cached_pdfium_document_releases_the_file_handle(self):
+        src = make_pdf(self.tmp / "apercu.pdf", num_pages=1)
+        self.app._render_pdf_page_image(src, None, 1)
+        self.assertIsNotNone(self.app._pdfium_cache_doc)
+
+        self.app._close_cached_pdfium_document()
+
+        self.assertIsNone(self.app._pdfium_cache_doc)
+        self.assertIsNone(self.app._pdfium_cache_key)
+        # Aucun handle pdfium residuel : le fichier doit pouvoir etre
+        # supprime immediatement (preuve indirecte mais concrete sur
+        # Windows, ou un fichier encore ouvert ne peut pas etre supprime).
+        src.unlink()
+
+    def test_closing_the_main_window_releases_the_cached_pdfium_document(self):
+        src = make_pdf(self.tmp / "apercu.pdf", num_pages=1)
+        self.app._render_pdf_page_image(src, None, 1)
+        self.assertIsNotNone(self.app._pdfium_cache_doc)
+
+        self.app._on_close()
+
+        self.assertIsNone(self.app._pdfium_cache_doc)
+        src.unlink()
+        # _on_close a deja detruit root - evite un double root.destroy()
+        # dans tearDown.
+        self.root = Tk()
+        self.root.withdraw()
+
+    # -- Lot avec echecs systemiques repetes (point 44 de l'audit) -----------------
+
+    def test_run_batch_stops_early_after_repeated_identical_failures(self):
+        pairs = [(self.tmp / f"f{i}.pdf", self.tmp / f"f{i}_out.pdf") for i in range(10)]
+
+        def always_same_failure(source, output):
+            raise ops.PdfOpsError("Espace disque insuffisant.")
+
+        successes, failures = self.app._run_batch(pairs, always_same_failure)
+
+        self.assertEqual(successes, [])
+        # 3 echecs individuels identiques, puis une ligne de synthese
+        # d'interruption (pas 10 lignes quasi identiques).
+        self.assertEqual(len(failures), 4)
+        for _source, message in failures[:3]:
+            self.assertEqual(message, "Espace disque insuffisant.")
+        self.assertIn("interrompu", failures[-1][1])
+        self.assertIn("7 fichier(s)", failures[-1][1])
+
+    def test_run_batch_does_not_stop_early_when_failures_differ(self):
+        # Non-regression : des echecs distincts (pas de panne systemique)
+        # ne doivent jamais interrompre le lot prematurement.
+        pairs = [(self.tmp / f"f{i}.pdf", self.tmp / f"f{i}_out.pdf") for i in range(5)]
+
+        def varying_failure(source, output):
+            raise ops.PdfOpsError(f"Erreur specifique a {source.name}")
+
+        successes, failures = self.app._run_batch(pairs, varying_failure)
+
+        self.assertEqual(successes, [])
+        self.assertEqual(len(failures), 5)
+
+    def test_run_batch_resets_the_streak_after_an_intervening_success(self):
+        # Non-regression : 2 echecs identiques, un succes, puis a nouveau
+        # des echecs identiques ne doivent pas cumuler le compteur a
+        # travers le succes intercale.
+        pairs = [(self.tmp / f"f{i}.pdf", self.tmp / f"f{i}_out.pdf") for i in range(6)]
+
+        def action(source, output):
+            if source.name == "f2.pdf":
+                return "ok"
+            raise ops.PdfOpsError("Erreur recurrente.")
+
+        successes, failures = self.app._run_batch(pairs, action)
+
+        self.assertEqual(len(successes), 1)
+        # 2 echecs (f0, f1), le succes intercale (f2) remet le compteur a
+        # zero, puis 3 nouveaux echecs identiques (f3, f4, f5) atteignent le
+        # seuil exactement sur le DERNIER fichier du lot : aucun fichier ne
+        # reste a traiter, donc pas de ligne de synthese d'interruption (le
+        # lot se termine naturellement en meme temps) - seulement les 5
+        # echecs individuels.
+        self.assertEqual(len(failures), 5)
+
+    # -- Avertissement avant un traitement volumineux (point 45 de l'audit) --------
+
+    def test_resolve_batch_outputs_warns_before_a_large_batch(self):
+        sources = [self.tmp / f"f{i}.pdf" for i in range(gui.LARGE_BATCH_FILE_THRESHOLD + 1)]
+        for src in sources:
+            make_pdf(src, num_pages=1)
+
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(self.tmp)) as mock_askdir, \
+                mock.patch("gui.messagebox.askyesno", return_value=True) as mock_confirm:
+            pairs = self.app._resolve_batch_outputs(sources, "resultat.pdf", "_suffixe")
+
+        mock_confirm.assert_called_once()
+        self.assertIn(str(len(sources)), mock_confirm.call_args[0][1])
+        mock_askdir.assert_called_once()
+        self.assertEqual(len(pairs), len(sources))
+
+    def test_resolve_batch_outputs_aborts_when_the_large_batch_warning_is_declined(self):
+        sources = [self.tmp / f"f{i}.pdf" for i in range(gui.LARGE_BATCH_FILE_THRESHOLD + 1)]
+        for src in sources:
+            make_pdf(src, num_pages=1)
+
+        with mock.patch("gui.filedialog.askdirectory") as mock_askdir, \
+                mock.patch("gui.messagebox.askyesno", return_value=False):
+            pairs = self.app._resolve_batch_outputs(sources, "resultat.pdf", "_suffixe")
+
+        self.assertIsNone(pairs)
+        # Refuse avant meme de demander le dossier de destination.
+        mock_askdir.assert_not_called()
+
+    def test_resolve_batch_outputs_does_not_warn_below_the_threshold(self):
+        sources = [self.tmp / f"f{i}.pdf" for i in range(3)]
+        for src in sources:
+            make_pdf(src, num_pages=1)
+
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(self.tmp)), \
+                mock.patch("gui.messagebox.askyesno") as mock_confirm:
+            pairs = self.app._resolve_batch_outputs(sources, "resultat.pdf", "_suffixe")
+
+        mock_confirm.assert_not_called()
+        self.assertEqual(len(pairs), 3)
+
+    def test_p2i_run_warns_before_converting_a_very_large_document(self):
+        src = make_pdf(self.tmp / "gros.pdf", num_pages=gui.LARGE_CONVERSION_PAGE_THRESHOLD + 1)
+        self.app.p2i_source_path = src
+        self.app.p2i_source_var.set(src.name)
+        self.app.p2i_dpi_var.set(72)
+
+        output_dir = self.tmp / "out"
+        output_dir.mkdir()
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(output_dir)), \
+                mock.patch("gui.messagebox.askyesno", return_value=False) as mock_confirm:
+            button = find_button(self.app.convert_tab, "Convertir en images...")
+            self.assertIsNotNone(button)
+            button.invoke()
+
+        mock_confirm.assert_called_once()
+        self.assertIn(str(gui.LARGE_CONVERSION_PAGE_THRESHOLD + 1), mock_confirm.call_args[0][1])
+        # Refuse : aucune image ne doit avoir ete produite.
+        self.assertEqual(list(output_dir.iterdir()), [])
+        self.assertFalse(self.info_messages or self.warning_messages or self.error_messages)
+
+    def test_p2i_run_does_not_warn_below_the_page_threshold(self):
+        src = make_pdf(self.tmp / "petit.pdf", num_pages=1)
+        self.app.p2i_source_path = src
+        self.app.p2i_source_var.set(src.name)
+        self.app.p2i_dpi_var.set(72)
+
+        output_dir = self.tmp / "out"
+        output_dir.mkdir()
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(output_dir)), \
+                mock.patch("gui.messagebox.askyesno") as mock_confirm:
+            button = find_button(self.app.convert_tab, "Convertir en images...")
+            self.assertIsNotNone(button)
+            button.invoke()
+
+        pump(self.root, self._done)
+
+        mock_confirm.assert_not_called()
+        self.assertEqual(len(self.info_messages), 1)
 
     # -- Mesure empirique de reactivite (methode de l'audit) -----------------------
 
@@ -712,6 +958,73 @@ class DpiAwarenessTestCase(unittest.TestCase):
         per_monitor_v2 = ctypes.c_void_p(-4)
         is_pm_v2 = bool(user32.AreDpiAwarenessContextsEqual(current_context, per_monitor_v2))
         self.assertTrue(is_pm_v2, "le processus devrait etre Per-Monitor V2 DPI Aware apres _configure_dpi_awareness()")
+
+
+class CompressionRatioPhraseTestCase(unittest.TestCase):
+    """Point 15 de l'audit : CompressionResult.ratio_percent n'a pas de
+    plancher a zero - un ratio negatif (fichier recompresse plus gros que
+    l'original) doit etre reformule explicitement plutot que colle tel quel
+    a cote du mot "reduction" (ex: "-12.3 % de reduction", confus)."""
+
+    def test_positive_ratio_uses_the_reduction_phrasing(self):
+        phrase = gui._compression_ratio_phrase(42.5)
+        self.assertEqual(phrase, "42.5 % de reduction au total")
+
+    def test_zero_ratio_uses_the_reduction_phrasing(self):
+        phrase = gui._compression_ratio_phrase(0.0)
+        self.assertEqual(phrase, "0 % de reduction au total")
+
+    def test_negative_ratio_is_reformulated_as_a_growth_instead_of_a_negative_reduction(self):
+        phrase = gui._compression_ratio_phrase(-12.3)
+        self.assertNotIn("-12.3 % de reduction", phrase)
+        self.assertIn("grossi", phrase)
+        self.assertIn("+12.3 %", phrase)
+
+
+class IconTestCase(unittest.TestCase):
+    """Point 19 de l'audit : icon.ico ne contenait qu'une seule resolution
+    (16x16), rendue floue/pixelisee des qu'agrandie (Explorateur en grandes
+    icones, raccourci bureau...). Regenere en multi-resolution via Pillow
+    (voir generate_icon.py)."""
+
+    def test_icon_embeds_the_standard_windows_icon_sizes(self):
+        from PIL import IcoImagePlugin
+
+        icon_path = Path(__file__).resolve().parent.parent / "icon.ico"
+        with open(icon_path, "rb") as f:
+            ico = IcoImagePlugin.IcoFile(f)
+            sizes = set(ico.sizes())
+
+        for expected in ((16, 16), (32, 32), (48, 48), (256, 256)):
+            self.assertIn(expected, sizes)
+
+
+class VersionInfoTestCase(unittest.TestCase):
+    """Point 20 de l'audit : l'executable PyInstaller n'embarquait aucune
+    ressource de version Windows (onglet "Details" des proprietes vide).
+    version_info.txt (reference par PdfAtelier.spec) doit rester syntaxiquement
+    valide et sa version synchronisee avec APP_VERSION a chaque release."""
+
+    def test_version_info_matches_app_version(self):
+        version_info_path = Path(__file__).resolve().parent.parent / "version_info.txt"
+        text = version_info_path.read_text(encoding="utf-8")
+        expected_short = gui.APP_VERSION
+        # Les chaines FileVersion/ProductVersion doivent correspondre a
+        # APP_VERSION - une desynchronisation ne casserait rien techniquement,
+        # mais afficherait un numero de version trompeur dans l'Explorateur.
+        self.assertIn(f"u'FileVersion', u'{expected_short}'", text)
+        self.assertIn(f"u'ProductVersion', u'{expected_short}'", text)
+
+    def test_version_info_parses_as_a_valid_pyinstaller_version_resource(self):
+        try:
+            import PyInstaller.utils.win32.versioninfo as vi
+        except ImportError:
+            self.skipTest("PyInstaller non installe dans cet environnement")
+
+        version_info_path = Path(__file__).resolve().parent.parent / "version_info.txt"
+        text = version_info_path.read_text(encoding="utf-8")
+        info = eval(text, vars(vi))  # meme mecanisme que PyInstaller lui-meme (voir spec)
+        self.assertIsInstance(info, vi.VSVersionInfo)
 
 
 if __name__ == "__main__":
