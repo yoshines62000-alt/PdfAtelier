@@ -116,6 +116,53 @@ def make_pdf_with_bomb_and_valid_images(path: Path) -> Path:
     return path
 
 
+def _make_pil_bomb_jpeg_bytes() -> bytes:
+    """Construit un vrai flux JPEG (structure valide, decodable par PIL) dont
+    l'entete SOF0 est patchee pour declarer des dimensions enormes
+    (65535x65535), sans les vraies donnees de pixels correspondantes. Cela
+    suffit a declencher PIL.Image.DecompressionBombError des l'appel a
+    Image.open (la taille est lue depuis l'entete avant tout decodage reel
+    des pixels) - contrairement a make_pdf_with_bomb_and_valid_images
+    ci-dessus, qui reproduit la protection anti-bombe *native de pypdf*
+    (LimitReachedError, sur un flux FlateDecode), ceci reproduit la
+    protection anti-bombe de PIL elle-meme sur un flux DCTDecode (JPEG), que
+    pypdf ne verifie pas lui-meme avant de le transmettre a PIL."""
+    import io
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (10, 10), color=(1, 2, 3)).save(buffer, format="JPEG")
+    data = bytearray(buffer.getvalue())
+    sof0 = data.index(bytes([0xFF, 0xC0]))
+    huge = (0xFFFF).to_bytes(2, "big")
+    height_offset = sof0 + 5
+    data[height_offset:height_offset + 2] = huge
+    data[height_offset + 2:height_offset + 4] = huge
+    return bytes(data)
+
+
+def make_pdf_with_pil_bomb_and_valid_images(path: Path) -> Path:
+    """PDF de 2 pages : la page 1 contient une image JPEG dont l'entete
+    declare des dimensions demesurees (voir _make_pil_bomb_jpeg_bytes), la
+    page 2 une vraie image JPEG valide - pour verifier qu'une image-bombe
+    cote PIL n'empeche jamais de traiter les images valides qui la
+    suivent."""
+    import io
+
+    writer = PdfWriter()
+
+    bomb_page = writer.add_blank_page(width=200, height=200)
+    _add_dct_image_xobject(writer, bomb_page, "/PilBombImg", _make_pil_bomb_jpeg_bytes(), 65535, 65535)
+
+    valid_page = writer.add_blank_page(width=200, height=200)
+    buffer = io.BytesIO()
+    Image.new("RGB", (10, 10), color=(200, 20, 20)).save(buffer, format="JPEG")
+    _add_dct_image_xobject(writer, valid_page, "/ValidImg", buffer.getvalue(), 10, 10)
+
+    with open(path, "wb") as f:
+        writer.write(f)
+    return path
+
+
 def make_pdf(path: Path, num_pages: int = 1, labels=None) -> Path:
     """Cree un PDF de test avec un texte distinct par page, pour verifier
     l'ordre/le contenu apres une operation."""
@@ -419,6 +466,36 @@ class PdfOpsTestCase(unittest.TestCase):
         self.assertEqual(result.images_recompressed, 1)  # seule l'image valide a pu etre recompressee
         self.assertEqual(result.images_failed, 1)
 
+    def test_compress_pdf_skips_a_page_whose_content_stream_compression_fails(self):
+        # Regression trouvee a l'audit : page.compress_content_streams()
+        # etait appele hors du try/except qui protege le traitement d'image
+        # de la meme page, laissant fuiter une exception brute (au lieu
+        # d'etre geree page par page comme le reste de compress_pdf) des
+        # qu'un flux de contenu de page est corrompu - avortant alors la
+        # compression de TOUT le document au lieu de sauter uniquement la
+        # page fautive.
+        from unittest.mock import patch
+        from pypdf._page import PageObject
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=2, labels=["Un", "Deux"])
+        output = self.tmp / "compressed.pdf"
+
+        # Premiere page : compress_content_streams() leve une exception.
+        # Deuxieme page : appel normal (no-op, aucune image a compresser).
+        with patch.object(
+            PageObject, "compress_content_streams",
+            side_effect=[RuntimeError("flux de contenu corrompu"), None],
+        ):
+            result = ops.compress_pdf(pdf, output, image_quality=40, max_dimension=300)
+
+        self.assertTrue(output.exists())
+        # Les 2 pages sont toujours presentes (et leur contenu intact) au
+        # lieu que tout le document parte en echec dur.
+        self.assertEqual(ops.get_page_count(output), 2)
+        texts = ops.extract_text(output)
+        self.assertIn("Un", texts[0])
+        self.assertIn("Deux", texts[1])
+        self.assertEqual(result.images_total, 0)
+
     def test_compression_result_images_failed_counts_unrecompressed_images(self):
         result = ops.CompressionResult(original_size=100, compressed_size=90, images_recompressed=2, images_total=5)
         self.assertEqual(result.images_failed, 3)
@@ -593,6 +670,22 @@ class PdfOpsTestCase(unittest.TestCase):
         with Image.open(extracted[0]) as img:
             self.assertEqual(img.size, (10, 10))
 
+    def test_extract_embedded_images_skips_a_pil_decompression_bomb_image_without_aborting_the_rest(self):
+        # Regression trouvee a l'audit : PIL.Image.DecompressionBombError
+        # (protection anti-bombe de PIL lui-meme, levee des Image.open sur un
+        # flux JPEG/DCTDecode dont l'entete declare des dimensions
+        # demesurees - cas que pypdf ne verifie pas de son cote, contrairement
+        # au flux FlateDecode du test precedent) n'herite d'aucune des
+        # classes de l'except (OSError, ValueError, KeyError, PyPdfError) :
+        # cette image "bombe" faisait donc quand meme avorter toute
+        # l'extraction du document au lieu d'etre simplement sautee.
+        pdf = make_pdf_with_pil_bomb_and_valid_images(self.tmp / "pil_bomb.pdf")
+        extracted = ops.extract_embedded_images(pdf, self.tmp / "out", "doc")
+        self.assertEqual(len(extracted), 1)
+        self.assertIn("p002", extracted[0].name)  # l'image valide de la page 2 est bien recuperee
+        with Image.open(extracted[0]) as img:
+            self.assertEqual(img.size, (10, 10))
+
     def test_extract_embedded_images_avoids_overwriting_a_pre_existing_file(self):
         # Regression trouvee a l'audit : extraire deux fois vers le meme
         # dossier (ou deux PDF de meme nom depuis des dossiers differents)
@@ -631,6 +724,25 @@ class PdfOpsTestCase(unittest.TestCase):
         output = self.tmp / "merged.pdf"
         ops.merge_pdfs([pdf_a, protected_b], output, passwords=[None, "secret"])
         self.assertEqual(ops.get_page_count(output), 2)
+
+    def test_merge_pdfs_rejects_a_shorter_passwords_list_instead_of_truncating_silently(self):
+        # Regression trouvee a l'audit : merge_pdfs zippait input_paths et
+        # passwords sans verifier leurs longueurs - zip() s'arrete
+        # silencieusement a la plus courte des deux listes, donc une liste
+        # `passwords` plus courte (mot de passe oublie par erreur pour un
+        # des fichiers) faisait disparaitre le ou les derniers fichiers de
+        # la fusion sans le moindre message d'erreur, au lieu de signaler
+        # clairement le probleme.
+        pdf_a = make_pdf(self.tmp / "a.pdf", num_pages=1, labels=["A1"])
+        pdf_b = make_pdf(self.tmp / "b.pdf", num_pages=1, labels=["B1"])
+        protected_b = self.tmp / "b_protected.pdf"
+        ops.set_password(pdf_b, protected_b, user_password="secret")
+
+        with self.assertRaises(ops.PdfOpsError):
+            # Mot de passe de protected_b manquant dans la liste : sans
+            # controle de longueur, ce fichier aurait ete purement et
+            # simplement ignore par zip() au lieu de lever une erreur.
+            ops.merge_pdfs([pdf_a, protected_b], self.tmp / "out.pdf", passwords=[None])
 
     def test_add_text_watermark_with_non_latin1_characters_does_not_crash(self):
         pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1)
@@ -860,6 +972,38 @@ class PdfOpsTestCase(unittest.TestCase):
         purged = self.tmp / "purge.pdf"
         ops.set_metadata(protected, purged, {}, password="secret")
         self.assertTrue(PdfReader(str(purged)).is_encrypted)
+
+    def test_set_metadata_on_owner_only_protected_pdf_raises_a_clear_error_instead_of_crashing(self):
+        # Regression trouvee a l'audit : sur un PDF protege UNIQUEMENT par un
+        # mot de passe proprietaire (voir
+        # test_owner_only_protected_pdf_opens_without_a_password), aucun mot
+        # de passe utilisateur n'est jamais demande a l'ouverture - `password`
+        # reste donc None ici, exactement comme le fait le GUI (onglet
+        # Proprietes, properties_source_password reste None dans ce cas).
+        # set_metadata appelait alors writer.encrypt(None, None), qui plante
+        # avec une TypeError brute et incomprehensible ("unsupported operand
+        # type(s) for +: 'NoneType' and 'bytes'") au lieu d'un message clair -
+        # casse 100% reproductible des boutons Enregistrer sous/Purger pour
+        # toute cette categorie de PDF pourtant tres courante (exports
+        # administratifs/bancaires).
+        pdf = make_pdf(self.tmp / "a.pdf", num_pages=1, labels=["Contenu"])
+        writer = PdfWriter()
+        writer.append(PdfReader(str(pdf)))
+        writer.encrypt(user_password="", owner_password="secretowner", algorithm="AES-256")
+        owner_only = self.tmp / "owner_only.pdf"
+        with open(owner_only, "wb") as f:
+            writer.write(f)
+        self.assertTrue(PdfReader(str(owner_only)).is_encrypted)
+
+        with self.assertRaises(ops.PdfOpsError) as ctx:
+            ops.set_metadata(owner_only, self.tmp / "out.pdf", {"title": "X"})
+        # Message clair pour l'utilisateur (pas la TypeError brute de pypdf),
+        # qui mentionne bien le mot de passe proprietaire manquant.
+        self.assertIn("proprietaire", str(ctx.exception))
+
+        # Meme garantie pour la purge (dict vide), l'autre bouton concerne.
+        with self.assertRaises(ops.PdfOpsError):
+            ops.set_metadata(owner_only, self.tmp / "purge.pdf", {})
 
     # -- pieces jointes -------------------------------------------------------------
 
@@ -1098,6 +1242,23 @@ class PdfOpsTestCase(unittest.TestCase):
         ]
         self.assertEqual(len(pypdf_lines), 1)
         self.assertIn("<7.0", pypdf_lines[0])
+
+    def test_requirements_pins_pillow_at_or_above_the_cve_fixed_floor(self):
+        # Regression trouvee a l'audit : Pillow>=10.0 incluait entierement la
+        # plage 10.3.0-12.1.1, vulnerable a CVE-2026-25990 (ecriture hors
+        # limites via PSD forge) et CVE-2026-40192 (bombe de decompression
+        # via FITS) - toutes deux corrigees en 12.2.0/12.1.1. 12.3.0 est le
+        # plancher retenu (meme plancher que PhotoTri, autre app de cette
+        # meme suite).
+        requirements_path = Path(__file__).resolve().parent.parent / "requirements.txt"
+        content = requirements_path.read_text(encoding="utf-8")
+        pillow_lines = [
+            line for line in content.splitlines()
+            if not line.strip().startswith("#")
+            and line.strip().lower().split("[")[0].split(">")[0].split("=")[0].strip() == "pillow"
+        ]
+        self.assertEqual(len(pillow_lines), 1)
+        self.assertIn(">=12.3.0", pillow_lines[0])
 
     # -- validation des champs numeriques (point 14 de l'audit) --------------------
 

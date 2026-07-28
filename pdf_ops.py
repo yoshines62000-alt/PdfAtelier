@@ -100,7 +100,22 @@ def _latin1_safe(text: str) -> str:
 def merge_pdfs(input_paths: list, output_path: Path, passwords: Optional[list] = None) -> None:
     if not input_paths:
         raise PdfOpsError("Aucun fichier a fusionner.")
-    passwords = passwords or [None] * len(input_paths)
+    if passwords is None:
+        passwords = [None] * len(input_paths)
+    elif len(passwords) != len(input_paths):
+        # zip() s'arrete silencieusement a la plus courte des deux listes :
+        # sans ce controle, une liste `passwords` plus courte que
+        # `input_paths` (mot de passe oublie par erreur pour un des
+        # fichiers, ou desalignement des deux listes cote appelant) aurait
+        # simplement tronque la fusion au nombre de mots de passe fournis,
+        # laissant le ou les derniers fichiers de cote sans aucun message -
+        # un PDF protege dont le mot de passe a ete omis aurait alors
+        # echoue silencieusement au lieu de signaler clairement le probleme
+        # (bug trouve a l'audit).
+        raise PdfOpsError(
+            f"La liste de mots de passe ({len(passwords)}) ne correspond pas "
+            f"au nombre de fichiers a fusionner ({len(input_paths)})."
+        )
     writer = PdfWriter()
     for path, password in zip(input_paths, passwords):
         reader = _open_reader(Path(path), password=password)
@@ -292,7 +307,16 @@ def compress_pdf(
                 # que de le passer sous silence, pour que l'utilisateur
                 # comprenne un taux de reduction plus faible que prevu.
                 continue
-        page.compress_content_streams()
+        try:
+            page.compress_content_streams()
+        except Exception:
+            # Meme philosophie que le try/except image ci-dessus (trouve a
+            # l'audit) : un flux de contenu de page corrompu ne doit pas
+            # faire planter la compression de tout le document avec une
+            # exception brute. On garde alors le flux d'origine (page non
+            # recompressee, mais toujours presente et intacte dans le
+            # writer) plutot que d'abandonner les pages suivantes.
+            continue
     _write_output(writer, output_path)
     compressed_size = Path(output_path).stat().st_size
     return CompressionResult(original_size, compressed_size, images_recompressed, images_total)
@@ -569,8 +593,38 @@ def set_metadata(
     NON protegee (regression de confidentialite trouvee a l'audit - le
     motif "nouveau writer, jamais reader.metadata" qui protege bien contre
     la fuite de metadonnees fait aussi disparaitre le chiffrement,
-    puisqu'un writer neuf n'est jamais chiffre par defaut)."""
+    puisqu'un writer neuf n'est jamais chiffre par defaut).
+
+    Cas particulier leve en PdfOpsError plutot que traite silencieusement :
+    un PDF protege uniquement par un mot de passe proprietaire (permissions
+    restreintes, mot de passe utilisateur vide - voir _open_reader) pour
+    lequel ce mot de passe proprietaire n'a pas ete fourni ici. Il est alors
+    impossible de savoir quel mot de passe reappliquer a la sortie ; plutot
+    que de rechiffrer avec None/"" (TypeError brute cote pypdf) ou de
+    supprimer silencieusement la protection d'origine, la fonction refuse
+    l'operation avec un message explicite (bug trouve a l'audit)."""
     reader = _open_reader(input_path, password=password)
+    if reader.is_encrypted and not password:
+        # PDF protege UNIQUEMENT par un mot de passe "proprietaire" (voir
+        # _open_reader) : `password` reste None/vide ici car _open_reader n'a
+        # jamais eu besoin de le demander, il a seulement tente en interne
+        # reader.decrypt("") - le vrai mot de passe proprietaire du fichier
+        # n'est donc pas connu de cette fonction. Sans ce garde-fou,
+        # writer.encrypt(password, password) plus bas recevait litteralement
+        # `None` et plantait avec une TypeError brute et incomprehensible
+        # ("unsupported operand type(s) for +: 'NoneType' and 'bytes'") -
+        # casse 100% reproductible des boutons Enregistrer sous/Purger pour
+        # toute cette categorie de PDF (bug trouve a l'audit). On ne
+        # reutilise donc jamais None/"" comme mot de passe de chiffrement, et
+        # on refuse explicitement plutot que de rechiffrer silencieusement
+        # avec un mot de passe vide, ce qui produirait une sortie a la
+        # protection differente de la source sans prevenir personne.
+        raise PdfOpsError(
+            f"{Path(input_path).name} est protege par un mot de passe "
+            "proprietaire qui n'a pas ete fourni : impossible de modifier "
+            "ses metadonnees sans perdre cette protection. Fournissez le "
+            "mot de passe proprietaire du fichier pour continuer."
+        )
     writer = PdfWriter()
     writer.append(reader)
     non_empty = {
@@ -734,7 +788,7 @@ def extract_embedded_images(
                 used_paths.add(output_path)
                 save_image.save(output_path)
                 output_paths.append(output_path)
-            except (OSError, ValueError, KeyError, PyPdfError):
+            except (OSError, ValueError, KeyError, PyPdfError, Image.DecompressionBombError):
                 # PyPdfError couvre notamment LimitReachedError, la
                 # protection anti-bombe-de-decompression native de pypdf
                 # (image declarant des dimensions demesurees pour un flux
@@ -742,5 +796,13 @@ def extract_embedded_images(
                 # remontait telle quelle et faisait echouer toute
                 # l'extraction du document au lieu de sauter uniquement
                 # l'image fautive (bug trouve a l'audit).
+                #
+                # Image.DecompressionBombError est un cas distinct : cote
+                # PIL cette fois (pas pypdf), leve par Image.open/.load quand
+                # le nombre de pixels declares depasse Image.MAX_IMAGE_PIXELS
+                # - n'herite d'aucune des classes ci-dessus (directement
+                # d'Exception), donc pas couvert par elles. Meme scenario
+                # "bombe de decompression" que LimitReachedError, juste
+                # detecte par l'autre bibliotheque (bug trouve a l'audit).
                 continue
     return output_paths
