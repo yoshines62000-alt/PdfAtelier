@@ -18,6 +18,8 @@ from tkinter import (
 )
 
 import pdf_ops as ops
+import opl_theme
+import opl_contact
 import update_checker
 
 APP_TITLE = "PdfAtelier"
@@ -156,6 +158,8 @@ class PdfAtelierApp:
                 self.root.iconbitmap(str(icon_path))
             except Exception:
                 pass
+
+        opl_theme.entete(self.root, "PdfAtelier", "Boite a outils PDF", on_contact=lambda: opl_contact.ouvrir(self.root, app="PdfAtelier", version=APP_VERSION)).pack(fill="x", side="top")
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
@@ -836,7 +840,7 @@ class PdfAtelierApp:
         ttk.Button(buttons, text="Retirer", command=self._merge_remove_selected).pack(fill=X, pady=2)
         ttk.Button(buttons, text="Vider la liste", command=self._merge_clear).pack(fill=X, pady=2)
 
-        ttk.Button(frame, text="Fusionner en un seul PDF...", command=self._merge_run).pack(anchor="w", padx=10, pady=10)
+        ttk.Button(frame, text="Fusionner en un seul PDF...", command=self._merge_run, style="Accent.TButton").pack(anchor="w", padx=10, pady=10)
 
     def _merge_add_files(self):
         self._add_pdfs_with_password_prompt(self.merge_files, self.merge_passwords)
@@ -2219,6 +2223,7 @@ def main():
         root = TkinterDnD.Tk()
     except ImportError:
         root = Tk()
+    opl_theme.apply(root, "PdfAtelier")
     PdfAtelierApp(root)
     root.mainloop()
 
