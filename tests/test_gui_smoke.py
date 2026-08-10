@@ -781,6 +781,122 @@ class GuiSmokeTestCase(unittest.TestCase):
         # echecs individuels.
         self.assertEqual(len(failures), 5)
 
+    # -- Onglet Par lot (traitement de masse d'une operation sur N PDF) ------------
+
+    def test_batch_run_numbering_processes_all_files_and_isolates_a_bad_one(self):
+        """Coeur de la logique batch : une operation (ici Numeroter) appliquee
+        a plusieurs PDF ecrit un resultat par fichier valide dans le dossier
+        de sortie choisi, sans jamais toucher les sources, et un fichier
+        illisible n'interrompt pas le reste du lot (capture par fichier)."""
+        good1 = make_pdf(self.tmp / "good1.pdf", num_pages=2)
+        good2 = make_pdf(self.tmp / "good2.pdf", num_pages=3)
+        bad = self.tmp / "bad.pdf"
+        bad.write_bytes(b"%PDF-1.4 pas un vrai pdf")  # force un echec a l'ouverture
+        good1_bytes_before = good1.read_bytes()
+
+        self.app.batch_sources = [good1, good2, bad]
+        gui.PdfAtelierApp._reload_listbox(self.app.batch_listbox, self.app.batch_sources)
+        self.app.batch_operation_var.set(gui.BATCH_OP_NUMBER)
+
+        out = self.tmp / "sortie"
+        out.mkdir()
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(out)):
+            self.app._batch_run()
+        pump(self.root, self._done)
+
+        # Les deux fichiers valides ont ete numerotes dans le dossier de sortie.
+        out1 = out / "good1_numerote.pdf"
+        out2 = out / "good2_numerote.pdf"
+        self.assertTrue(out1.exists())
+        self.assertTrue(out2.exists())
+        self.assertEqual(len(PdfReader(str(out1)).pages), 2)
+        self.assertEqual(len(PdfReader(str(out2)).pages), 3)
+        # Le fichier illisible n'a produit aucune sortie mais n'a pas fait
+        # echouer le lot entier.
+        self.assertFalse((out / "bad_numerote.pdf").exists())
+        self.assertEqual(sorted(p.name for p in out.iterdir()), ["good1_numerote.pdf", "good2_numerote.pdf"])
+        # Les sources sont intactes (jamais modifiees en place).
+        self.assertEqual(good1.read_bytes(), good1_bytes_before)
+        # Recapitulatif : 2 reussites + l'echec nomme.
+        self.assertEqual(len(self.info_messages), 1)
+        self.assertIn("2 fichier(s)", self.info_messages[0])
+        self.assertIn("echec", self.info_messages[0])
+        self.assertIn("bad.pdf", self.info_messages[0])
+
+    def test_batch_run_compress_reports_aggregate_and_spares_sources(self):
+        srcs = [make_pdf(self.tmp / f"c{i}.pdf", num_pages=1) for i in range(3)]
+        self.app.batch_sources = list(srcs)
+        gui.PdfAtelierApp._reload_listbox(self.app.batch_listbox, self.app.batch_sources)
+        self.app.batch_operation_var.set(gui.BATCH_OP_COMPRESS)
+
+        out = self.tmp / "out_c"
+        out.mkdir()
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(out)):
+            self.app._batch_run()
+        pump(self.root, self._done)
+
+        produced = sorted(p.name for p in out.iterdir())
+        self.assertEqual(produced, ["c0_compresse.pdf", "c1_compresse.pdf", "c2_compresse.pdf"])
+        # Toutes les sources existent toujours.
+        for src in srcs:
+            self.assertTrue(src.exists())
+        # Le label de resultat agrege affiche une comparaison de taille.
+        self.assertIn("->", self.app.batch_result_var.get())
+        self.assertEqual(len(self.info_messages), 1)
+        self.assertIn("3 fichier(s)", self.info_messages[0])
+
+    def test_batch_run_watermark_uses_output_dir_and_chosen_suffix(self):
+        srcs = [make_pdf(self.tmp / f"w{i}.pdf", num_pages=1) for i in range(2)]
+        self.app.batch_sources = list(srcs)
+        gui.PdfAtelierApp._reload_listbox(self.app.batch_listbox, self.app.batch_sources)
+        self.app.batch_operation_var.set(gui.BATCH_OP_WATERMARK)
+        self.app.batch_wm_text_var.set("BROUILLON")
+
+        out = self.tmp / "out_w"
+        out.mkdir()
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(out)):
+            self.app._batch_run()
+        pump(self.root, self._done)
+
+        self.assertEqual(sorted(p.name for p in out.iterdir()), ["w0_filigrane.pdf", "w1_filigrane.pdf"])
+
+    def test_batch_run_rejects_empty_watermark_text_before_choosing_output(self):
+        srcs = [make_pdf(self.tmp / "e.pdf", num_pages=1)]
+        self.app.batch_sources = list(srcs)
+        self.app.batch_operation_var.set(gui.BATCH_OP_WATERMARK)
+        self.app.batch_wm_text_var.set("   ")
+
+        with mock.patch("gui.filedialog.askdirectory") as mock_askdir:
+            self.app._batch_run()
+
+        # Refuse avant meme de demander le dossier de destination.
+        mock_askdir.assert_not_called()
+        self.assertTrue(any("filigrane" in m for m in self.warning_messages))
+
+    def test_batch_add_folder_collects_pdfs_and_skips_duplicates(self):
+        folder = self.tmp / "dossier"
+        folder.mkdir()
+        make_pdf(folder / "a.pdf", num_pages=1)
+        make_pdf(folder / "b.pdf", num_pages=1)
+        (folder / "notes.txt").write_text("pas un pdf", encoding="utf-8")
+
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(folder)):
+            self.app._batch_add_folder()
+        self.assertEqual(len(self.app.batch_sources), 2)
+        self.assertEqual(sorted(p.name for p in self.app.batch_sources), ["a.pdf", "b.pdf"])
+
+        # Reajouter le meme dossier ne cree pas de doublons.
+        with mock.patch("gui.filedialog.askdirectory", return_value=str(folder)):
+            self.app._batch_add_folder()
+        self.assertEqual(len(self.app.batch_sources), 2)
+
+    def test_batch_run_without_sources_warns(self):
+        self.app.batch_sources = []
+        with mock.patch("gui.filedialog.askdirectory") as mock_askdir:
+            self.app._batch_run()
+        mock_askdir.assert_not_called()
+        self.assertTrue(self.warning_messages)
+
     # -- Avertissement avant un traitement volumineux (point 45 de l'audit) --------
 
     def test_resolve_batch_outputs_warns_before_a_large_batch(self):

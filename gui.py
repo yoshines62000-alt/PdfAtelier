@@ -40,6 +40,15 @@ IMAGE_FILETYPES = [("Images", "*.png *.jpg *.jpeg *.bmp *.tiff")]
 LARGE_BATCH_FILE_THRESHOLD = 30
 LARGE_CONVERSION_PAGE_THRESHOLD = 300
 
+# Onglet « Par lot » : les trois operations proposees en traitement de masse,
+# chacune reutilisant telle quelle la fonction correspondante de pdf_ops (aucune
+# operation PDF n'est reimplementee ici). Les libelles servent aussi de valeurs
+# de la liste deroulante de choix d'operation.
+BATCH_OP_COMPRESS = "Compresser"
+BATCH_OP_WATERMARK = "Filigrane (texte)"
+BATCH_OP_NUMBER = "Numeroter les pages"
+BATCH_OPERATIONS = (BATCH_OP_COMPRESS, BATCH_OP_WATERMARK, BATCH_OP_NUMBER)
+
 
 def _resource_path(relative: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -163,11 +172,11 @@ class PdfAtelierApp:
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
-        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground="#666").pack(side=LEFT, padx=(8, 0), pady=4)
+        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground=opl_theme.couleur("texte_doux")).pack(side=LEFT, padx=(8, 0), pady=4)
         self.update_status_var = StringVar(value="")
-        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground="#666")
+        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground=opl_theme.couleur("texte_doux"))
         self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
-        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
+        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground=opl_theme.couleur("lien"), cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
 
@@ -188,6 +197,7 @@ class PdfAtelierApp:
         self.protect_tab = ttk.Frame(notebook)
         self.text_tab = ttk.Frame(notebook)
         self.properties_tab = ttk.Frame(notebook)
+        self.batch_tab = ttk.Frame(notebook)
 
         notebook.add(self.merge_tab, text="Fusionner")
         notebook.add(self.split_tab, text="Diviser")
@@ -199,6 +209,7 @@ class PdfAtelierApp:
         notebook.add(self.protect_tab, text="Protection")
         notebook.add(self.text_tab, text="Texte")
         notebook.add(self.properties_tab, text="Proprietes")
+        notebook.add(self.batch_tab, text="Par lot")
 
         self._build_merge_tab()
         self._build_split_tab()
@@ -210,6 +221,7 @@ class PdfAtelierApp:
         self._build_protect_tab()
         self._build_text_tab()
         self._build_properties_tab()
+        self._build_batch_tab()
 
     def _on_close(self):
         """Gestionnaire de fermeture de la fenetre principale (bouton X) :
@@ -227,11 +239,11 @@ class PdfAtelierApp:
             return
         if status == "update_available":
             self.update_status_var.set(f"Mise a jour disponible : {tag} - Telecharger")
-            self.update_status_label.configure(foreground="#0645AD", cursor="hand2")
+            self.update_status_label.configure(foreground=opl_theme.couleur("lien"), cursor="hand2")
             self.update_status_label.bind("<Button-1>", lambda event: webbrowser.open(RELEASES_URL))
         elif status == "up_to_date":
             self.update_status_var.set("A jour")
-            self.update_status_label.configure(foreground="#1B7A1B", cursor="")
+            self.update_status_label.configure(foreground=opl_theme.couleur("succes"), cursor="")
         # "check_failed" (hors ligne, GitHub inaccessible...) : on ne
         # revendique rien plutot que d'afficher a tort "a jour".
 
@@ -551,24 +563,33 @@ class PdfAtelierApp:
         output_dir = filedialog.askdirectory(title="Dossier de destination")
         if not output_dir:
             return None
-        # Deux sources peuvent produire le meme nom de fichier de sortie
-        # (meme fichier ajoute deux fois via le glisser-depose, ou deux
-        # fichiers de meme nom venant de dossiers differents) : sans
-        # desambiguisation, la seconde ecraserait silencieusement le
-        # resultat de la premiere tout en etant comptee comme un succes a
-        # part entiere dans le resume (bug trouve a l'audit).
-        #
-        # Il ne suffit pas non plus de dedoublonner uniquement contre les
-        # autres sources DE CE LOT (`used_outputs`) : relancer le meme
-        # traitement (Compresser, Filigrane, Numeroter, Protection...) vers
-        # le meme dossier de destination reutilise exactement les memes noms
-        # generes que la fois precedente et ecraserait alors silencieusement
-        # des resultats DEJA PRESENTS SUR DISQUE (second bug, distinct du
-        # premier, trouve au meme audit) - d'ou le test `candidate.exists()`
-        # en plus de `candidate in used_outputs`, meme mecanisme que celui
-        # deja en place dans extract_attachments/extract_embedded_images
-        # (pdf_ops.py) et desormais aussi dans split_pdf_by_ranges/
-        # pdf_to_images.
+        return self._pairs_in_directory(sources, output_dir, batch_suffix)
+
+    def _pairs_in_directory(self, sources: list, output_dir, batch_suffix: str):
+        """Construit la liste de paires (source, sortie) dans `output_dir`, un
+        nom genere par source (`<nom>{batch_suffix}.pdf`), en desambiguisant
+        les collisions. Renvoie la liste, ou None si l'utilisateur refuse un
+        ecrasement de fichier source. Partage entre `_resolve_batch_outputs`
+        (onglets fichier/lot) et l'onglet « Par lot » (dossier de sortie
+        toujours choisi explicitement).
+
+        Deux sources peuvent produire le meme nom de fichier de sortie (meme
+        fichier ajoute deux fois via le glisser-depose, ou deux fichiers de
+        meme nom venant de dossiers differents) : sans desambiguisation, la
+        seconde ecraserait silencieusement le resultat de la premiere tout en
+        etant comptee comme un succes a part entiere dans le resume (bug trouve
+        a l'audit).
+
+        Il ne suffit pas non plus de dedoublonner uniquement contre les autres
+        sources DE CE LOT (`used_outputs`) : relancer le meme traitement
+        (Compresser, Filigrane, Numeroter, Protection...) vers le meme dossier
+        de destination reutilise exactement les memes noms generes que la fois
+        precedente et ecraserait alors silencieusement des resultats DEJA
+        PRESENTS SUR DISQUE (second bug, distinct du premier, trouve au meme
+        audit) - d'ou le test `candidate.exists()` en plus de `candidate in
+        used_outputs`, meme mecanisme que celui deja en place dans
+        extract_attachments/extract_embedded_images (pdf_ops.py) et desormais
+        aussi dans split_pdf_by_ranges/pdf_to_images."""
         pairs = []
         used_outputs = set()
         for src in sources:
@@ -699,7 +720,7 @@ class PdfAtelierApp:
         progress_bar.pack(padx=20, pady=5)
         if indeterminate:
             progress_bar.start(15)
-        ttk.Label(dialog, textvariable=status_var, foreground="#666").pack(padx=20, pady=(0, 15))
+        ttk.Label(dialog, textvariable=status_var, foreground=opl_theme.couleur("texte_doux")).pack(padx=20, pady=(0, 15))
         dialog.update_idletasks()
         try:
             dialog.grab_set()
@@ -1392,7 +1413,7 @@ class PdfAtelierApp:
         ttk.Label(
             extract_img,
             text="Recupere les photos/logos tels qu'embarques dans le PDF, sans rasteriser la page entiere.",
-            foreground="#666",
+            foreground=opl_theme.couleur("texte_doux"),
         ).pack(anchor="w", padx=5)
         ttk.Button(extract_img, text="Extraire les images...", command=self._eei_run).pack(anchor="w", padx=5, pady=5)
 
@@ -1411,7 +1432,7 @@ class PdfAtelierApp:
         ttk.Label(
             extract_att,
             text="Recupere les fichiers embarques (XML de facture electronique, images, autres PDF...).",
-            foreground="#666",
+            foreground=opl_theme.couleur("texte_doux"),
         ).pack(anchor="w", padx=5)
         # Point 12 de l'audit : PdfAtelier n'ouvre jamais lui-meme les
         # pieces jointes extraites (bon reflexe deja en place), mais rien
@@ -1424,7 +1445,7 @@ class PdfAtelierApp:
             extract_att,
             text="Verifiez la provenance du PDF avant d'ouvrir les fichiers extraits : ils peuvent "
             "contenir du contenu actif (macros, executables).",
-            foreground="#8a5a00",
+            foreground=opl_theme.couleur("avertissement"),
         ).pack(anchor="w", padx=5)
         ttk.Button(extract_att, text="Extraire les pieces jointes...", command=self._eea_run).pack(anchor="w", padx=5, pady=5)
 
@@ -1865,7 +1886,7 @@ class PdfAtelierApp:
 
         ttk.Label(
             frame, text="En mode lot (plusieurs fichiers), le meme mot de passe est applique/retire sur chacun.",
-            foreground="#666",
+            foreground=opl_theme.couleur("texte_doux"),
         ).pack(anchor="w", padx=10, pady=(10, 0))
 
         ttk.Button(frame, text="Appliquer...", command=self._protect_run).pack(anchor="w", padx=10, pady=15)
@@ -1986,8 +2007,8 @@ class PdfAtelierApp:
         scrollbar = ttk.Scrollbar(body, orient=VERTICAL)
         from tkinter import Text
         self.text_output = Text(body, wrap="word", yscrollcommand=scrollbar.set)
-        self.text_output.tag_configure("search_match", background="#fff59d")
-        self.text_output.tag_configure("search_current", background="#ffb300")
+        self.text_output.tag_configure("search_match", background=opl_theme.couleur("surbrillance"))
+        self.text_output.tag_configure("search_current", background=opl_theme.couleur("avertissement"))
         scrollbar.config(command=self.text_output.yview)
         self.text_output.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
@@ -2120,7 +2141,7 @@ class PdfAtelierApp:
             frame,
             text="\"Enregistrer sous\" applique les champs ci-dessus. \"Purger\" les efface tous\n"
                  "(le producteur devient \"pypdf\" a l'ecriture, ce champ ne peut pas etre vide).",
-            foreground="#666", justify=LEFT,
+            foreground=opl_theme.couleur("texte_doux"), justify=LEFT,
         ).pack(anchor="w", padx=10, pady=(5, 0))
 
         buttons = ttk.Frame(frame)
@@ -2202,6 +2223,313 @@ class PdfAtelierApp:
         self._run_safely_in_background(
             purge_action, on_success, success_message=f"Metadonnees purgees : {output.name}",
         )
+
+    # -- onglet Par lot ---------------------------------------------------------------
+
+    def _build_batch_tab(self):
+        """Onglet unique appliquant UNE operation (Compresser, Filigrane,
+        Numeroter) a PLUSIEURS PDF a la fois - fichiers choisis un a un ou un
+        dossier entier - en ecrivant les resultats dans un dossier de
+        destination choisi, sans jamais toucher aux fichiers source. Chaque
+        operation reutilise telle quelle la fonction de pdf_ops correspondante
+        (celles-la memes qu'utilisent les onglets Compresser/Filigrane/
+        Numeroter) ; le traitement tourne dans un thread separe avec barre de
+        progression (fichier courant / total) et un recapitulatif final
+        detaillant les reussites et les echecs par fichier, exactement comme
+        les modes lot deja en place (voir _run_batch / _show_batch_summary)."""
+        frame = self.batch_tab
+        self.batch_sources: list = []
+        self.batch_passwords: dict = {}
+        self.batch_operation_var = StringVar(value=BATCH_OP_COMPRESS)
+        self.batch_result_var = StringVar(value="")
+
+        # Reglages par operation (memes valeurs par defaut que les onglets
+        # dedies, pour un comportement identique en mode lot).
+        self.batch_compress_quality_var = IntVar(value=60)
+        self.batch_compress_max_dim_var = IntVar(value=1600)
+        self.batch_wm_text_var = StringVar(value="CONFIDENTIEL")
+        self.batch_wm_opacity_var = IntVar(value=30)
+        self.batch_wm_angle_var = IntVar(value=45)
+        self.batch_wm_size_var = IntVar(value=40)
+        self.batch_num_position_var = StringVar(value="bas-centre")
+        self.batch_num_start_var = IntVar(value=1)
+        self.batch_num_format_var = StringVar(value="{page} / {total}")
+        self.batch_num_size_var = IntVar(value=10)
+
+        top = ttk.Frame(frame)
+        top.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        self.batch_listbox = ttk_listbox(top, height=6)
+        self.batch_listbox.pack(side=LEFT, fill=BOTH, expand=True)
+        self._register_pdf_drop(
+            self.batch_listbox, self.batch_sources,
+            lambda: self._reload_listbox(self.batch_listbox, self.batch_sources), self.batch_passwords,
+        )
+        buttons = ttk.Frame(top)
+        buttons.pack(side=LEFT, fill=Y, padx=(10, 0))
+        ttk.Button(buttons, text="Ajouter des fichiers...", command=self._batch_add_files).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Ajouter un dossier...", command=self._batch_add_folder).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Retirer", command=self._batch_remove_selected).pack(fill=X, pady=2)
+        ttk.Button(buttons, text="Vider", command=self._batch_clear).pack(fill=X, pady=2)
+
+        op_row = ttk.Frame(frame)
+        op_row.pack(fill=X, padx=10, pady=(5, 0))
+        ttk.Label(op_row, text="Operation a appliquer").pack(side=LEFT)
+        ttk.Combobox(
+            op_row, textvariable=self.batch_operation_var, state="readonly", width=22,
+            values=list(BATCH_OPERATIONS),
+        ).pack(side=LEFT, padx=5)
+
+        # Le changement d'operation echange le panneau de reglages affiche
+        # (un seul visible a la fois) pour garder l'onglet compact et ne pas
+        # deborder de la hauteur minimale de la fenetre.
+        # Conteneur des panneaux de reglages : un LabelFrame par operation,
+        # empile mais un seul packe a la fois (voir _batch_update_options).
+        self._batch_options_container = ttk.Frame(frame)
+        self._batch_options_container.pack(fill=X, padx=10, pady=(8, 0))
+        self._batch_option_frames = {
+            BATCH_OP_COMPRESS: self._build_batch_compress_options(),
+            BATCH_OP_WATERMARK: self._build_batch_watermark_options(),
+            BATCH_OP_NUMBER: self._build_batch_number_options(),
+        }
+        # Reagit au choix d'operation dans la liste deroulante.
+        self.batch_operation_var.trace_add("write", lambda *_: self._batch_update_options())
+        self._batch_update_options()
+
+        ttk.Button(
+            frame, text="Traiter le lot...", command=self._batch_run, style="Accent.TButton",
+        ).pack(anchor="w", padx=10, pady=15)
+        ttk.Label(frame, textvariable=self.batch_result_var, foreground=opl_theme.couleur("texte_doux")).pack(anchor="w", padx=10)
+
+    def _build_batch_compress_options(self):
+        panel = ttk.LabelFrame(self._batch_options_container, text=BATCH_OP_COMPRESS)
+        ttk.Label(panel, text="Qualite des images (1 = tres compresse, 95 = quasi sans perte)").pack(anchor="w", padx=8, pady=(6, 0))
+        ttk.Scale(panel, from_=1, to=95, orient=HORIZONTAL, variable=self.batch_compress_quality_var, length=300).pack(anchor="w", padx=8)
+        row = ttk.Frame(panel)
+        row.pack(anchor="w", padx=8, pady=(6, 8))
+        ttk.Label(row, text="Dimension maximale des images (pixels)").pack(side=LEFT)
+        ttk.Entry(row, textvariable=self.batch_compress_max_dim_var, width=10).pack(side=LEFT, padx=5)
+        return panel
+
+    def _build_batch_watermark_options(self):
+        panel = ttk.LabelFrame(self._batch_options_container, text=BATCH_OP_WATERMARK)
+        row1 = ttk.Frame(panel)
+        row1.pack(anchor="w", padx=8, pady=(6, 0))
+        ttk.Label(row1, text="Texte du filigrane").pack(side=LEFT)
+        ttk.Entry(row1, textvariable=self.batch_wm_text_var, width=30).pack(side=LEFT, padx=5)
+        ttk.Label(panel, text="Opacite (%)").pack(anchor="w", padx=8, pady=(6, 0))
+        ttk.Scale(panel, from_=5, to=100, orient=HORIZONTAL, variable=self.batch_wm_opacity_var, length=300).pack(anchor="w", padx=8)
+        row2 = ttk.Frame(panel)
+        row2.pack(anchor="w", padx=8, pady=(6, 8))
+        ttk.Label(row2, text="Angle (deg)").pack(side=LEFT)
+        ttk.Entry(row2, textvariable=self.batch_wm_angle_var, width=6).pack(side=LEFT, padx=5)
+        ttk.Label(row2, text="Taille de police").pack(side=LEFT, padx=(15, 0))
+        ttk.Entry(row2, textvariable=self.batch_wm_size_var, width=6).pack(side=LEFT, padx=5)
+        return panel
+
+    def _build_batch_number_options(self):
+        panel = ttk.LabelFrame(self._batch_options_container, text=BATCH_OP_NUMBER)
+        row1 = ttk.Frame(panel)
+        row1.pack(anchor="w", padx=8, pady=(6, 0))
+        ttk.Label(row1, text="Position").pack(side=LEFT)
+        ttk.Combobox(
+            row1, textvariable=self.batch_num_position_var, state="readonly", width=14,
+            values=["bas-centre", "bas-droite", "bas-gauche", "haut-centre", "haut-droite", "haut-gauche"],
+        ).pack(side=LEFT, padx=5)
+        ttk.Label(row1, text="Commencer a").pack(side=LEFT, padx=(15, 0))
+        ttk.Entry(row1, textvariable=self.batch_num_start_var, width=6).pack(side=LEFT, padx=5)
+        ttk.Label(row1, text="Taille de police").pack(side=LEFT, padx=(15, 0))
+        ttk.Entry(row1, textvariable=self.batch_num_size_var, width=6).pack(side=LEFT, padx=5)
+        row2 = ttk.Frame(panel)
+        row2.pack(anchor="w", padx=8, pady=(6, 8))
+        ttk.Label(row2, text="Format ({page} et {total} disponibles)").pack(side=LEFT)
+        ttk.Entry(row2, textvariable=self.batch_num_format_var, width=20).pack(side=LEFT, padx=5)
+        return panel
+
+    def _batch_update_options(self):
+        selected = self.batch_operation_var.get()
+        for op, panel in self._batch_option_frames.items():
+            if op == selected:
+                panel.pack(fill=X)
+            else:
+                panel.pack_forget()
+
+    def _batch_add_files(self):
+        self._add_pdfs_with_password_prompt(self.batch_sources, self.batch_passwords)
+        self._reload_listbox(self.batch_listbox, self.batch_sources)
+        self.batch_result_var.set("")
+
+    def _batch_add_folder(self):
+        """Ajoute tous les PDF (non recursif) d'un dossier choisi, en evitant
+        les doublons deja presents dans la liste et en demandant un mot de
+        passe pour chaque fichier protege (comme l'ajout fichier par fichier).
+        Volontairement non recursif : n'aspire pas les PDF de sous-dossiers
+        profonds que l'utilisateur n'aurait pas l'intention d'inclure."""
+        folder = filedialog.askdirectory(title="Choisir un dossier de PDF")
+        if not folder:
+            return
+        existing = {self._resolve(p) for p in self.batch_sources}
+        # `Path.glob("*.pdf")` est sensible a la casse selon la plateforme :
+        # on filtre plutot sur le suffixe en minuscules pour capturer aussi
+        # bien ".pdf" que ".PDF".
+        candidates = sorted(
+            p for p in Path(folder).iterdir() if p.is_file() and p.suffix.lower() == ".pdf"
+        )
+        added = 0
+        skipped_protected = 0
+        for path in candidates:
+            if self._resolve(path) in existing:
+                continue
+            count, password = self._load_page_count_with_password_prompt(path)
+            if count is None:
+                skipped_protected += 1
+                continue
+            self.batch_sources.append(path)
+            existing.add(self._resolve(path))
+            if password:
+                self.batch_passwords[self._resolve(path)] = password
+            added += 1
+        self._reload_listbox(self.batch_listbox, self.batch_sources)
+        self.batch_result_var.set("")
+        if not candidates:
+            messagebox.showinfo(APP_TITLE, "Aucun fichier PDF trouve dans ce dossier.")
+        elif added == 0:
+            messagebox.showinfo(APP_TITLE, "Aucun nouveau PDF ajoute (deja presents ou non lisibles).")
+
+    def _batch_remove_selected(self):
+        selection = self.batch_listbox.curselection()
+        if not selection:
+            return
+        del self.batch_sources[selection[0]]
+        self._reload_listbox(self.batch_listbox, self.batch_sources)
+
+    def _batch_clear(self):
+        self.batch_sources.clear()
+        self.batch_passwords.clear()
+        self._reload_listbox(self.batch_listbox, self.batch_sources)
+        self.batch_result_var.set("")
+
+    # Suffixe de nom de fichier de sortie et libelle de resume par operation -
+    # memes suffixes que les onglets dedies, pour une sortie coherente quel
+    # que soit le chemin (onglet dedie ou onglet Par lot).
+    _BATCH_META = {
+        BATCH_OP_COMPRESS: ("_compresse", "compresse(s)"),
+        BATCH_OP_WATERMARK: ("_filigrane", "traite(s) (filigrane applique)"),
+        BATCH_OP_NUMBER: ("_numerote", "traite(s) (pages numerotees)"),
+    }
+
+    def _batch_build_action(self, operation: str):
+        """Valide les reglages de l'operation choisie (lus ici, sur le thread
+        principal - Tkinter n'est pas thread-safe) et renvoie la fonction
+        action_for_pair(source, output) a passer a _run_batch, ou None si un
+        reglage est invalide (un message a alors deja ete affiche). Chaque
+        action delegue integralement a la fonction pdf_ops correspondante."""
+        if operation == BATCH_OP_COMPRESS:
+            try:
+                quality = self.batch_compress_quality_var.get()
+                max_dim = self.batch_compress_max_dim_var.get()
+            except Exception as exc:
+                messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+                return None
+            return lambda source, output: ops.compress_pdf(
+                source, output, image_quality=quality, max_dimension=max_dim,
+                password=self.batch_passwords.get(self._resolve(source)),
+            )
+        if operation == BATCH_OP_WATERMARK:
+            text = self.batch_wm_text_var.get().strip()
+            if not text:
+                messagebox.showwarning(APP_TITLE, "Le texte du filigrane ne peut pas etre vide.")
+                return None
+            try:
+                opacity = self.batch_wm_opacity_var.get() / 100.0
+                font_size = self.batch_wm_size_var.get()
+                angle = self.batch_wm_angle_var.get()
+            except Exception as exc:
+                messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+                return None
+            return lambda source, output: ops.add_text_watermark(
+                source, output, text, opacity=opacity, font_size=font_size, angle=angle,
+                password=self.batch_passwords.get(self._resolve(source)),
+            )
+        # BATCH_OP_NUMBER
+        fmt = self.batch_num_format_var.get().strip()
+        if not fmt:
+            messagebox.showwarning(APP_TITLE, "Le format ne peut pas etre vide.")
+            return None
+        try:
+            fmt.format(page=1, total=1)
+        except (KeyError, ValueError, IndexError, TypeError, AttributeError) as exc:
+            messagebox.showwarning(APP_TITLE, f"Format invalide : {exc}")
+            return None
+        try:
+            start_at = self.batch_num_start_var.get()
+            font_size = self.batch_num_size_var.get()
+        except Exception as exc:
+            messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+            return None
+        position = self.batch_num_position_var.get()
+        return lambda source, output: ops.add_page_numbers(
+            source, output, position=position, start_at=start_at, font_size=font_size, fmt=fmt,
+            password=self.batch_passwords.get(self._resolve(source)),
+        )
+
+    def _batch_run(self):
+        if not self.batch_sources:
+            messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
+            return
+        operation = self.batch_operation_var.get()
+        suffix, verb = self._BATCH_META[operation]
+        action_for_pair = self._batch_build_action(operation)
+        if action_for_pair is None:
+            return
+
+        sources = list(self.batch_sources)
+        # Meme avertissement de lot volumineux que _resolve_batch_outputs
+        # (point 45 de l'audit) - ici l'onglet ecrit toujours dans un dossier
+        # choisi, donc pas de branche fichier unique.
+        if len(sources) > LARGE_BATCH_FILE_THRESHOLD and not messagebox.askyesno(
+            APP_TITLE,
+            f"Ce traitement porte sur {len(sources)} fichiers, cela peut prendre plusieurs minutes. "
+            "Continuer ?",
+        ):
+            return
+        output_dir = filedialog.askdirectory(title="Dossier de destination")
+        if not output_dir:
+            return
+        pairs = self._pairs_in_directory(sources, output_dir, suffix)
+        if pairs is None:
+            return
+
+        def work(report):
+            return self._run_batch(pairs, action_for_pair, report=report)
+
+        def on_done(result, error):
+            if error is not None:
+                messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
+                return
+            successes, failures = result
+            extra_note = None
+            if operation == BATCH_OP_COMPRESS and successes:
+                total_original = sum(r.original_size for _, _, r in successes)
+                total_compressed = sum(r.compressed_size for _, _, r in successes)
+                ratio = round(100 * (1 - total_compressed / total_original), 1) if total_original else 0.0
+                summary = (
+                    f"{_format_size(total_original)} -> {_format_size(total_compressed)} "
+                    f"({_compression_ratio_phrase(ratio)})"
+                )
+                total_images_failed = sum(r.images_failed for _, _, r in successes)
+                if total_images_failed:
+                    failed_files = [source.name for source, _, r in successes if r.images_failed]
+                    extra_note = (
+                        f"{total_images_failed} image(s) n'ont pas pu etre recompressees (format non "
+                        "supporte) et ont ete conservees telles quelles, dans "
+                        f"{len(failed_files)} fichier(s) : " + ", ".join(failed_files)
+                    )
+                self.batch_result_var.set(summary)
+            else:
+                self.batch_result_var.set(f"{len(successes)} fichier(s) {verb}, {len(failures)} echec(s).")
+            self._show_batch_summary(successes, failures, verb, extra_note=extra_note)
+
+        self._run_in_background_with_progress(work, on_done)
 
 
 def ttk_listbox(parent, height=12, selectmode="browse"):
