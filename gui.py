@@ -168,7 +168,7 @@ class PdfAtelierApp:
             except Exception:
                 pass
 
-        opl_theme.entete(self.root, "PdfAtelier", "Boite a outils PDF", on_contact=lambda: opl_contact.ouvrir(self.root, app="PdfAtelier", version=APP_VERSION)).pack(fill="x", side="top")
+        opl_theme.entete(self.root, "PdfAtelier", "Boite a outils PDF", on_contact=lambda: opl_contact.ouvrir(self.root, app="PdfAtelier", version=APP_VERSION), slug="pdfatelier", version=APP_VERSION).pack(fill="x", side="top")
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
