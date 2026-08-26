@@ -140,7 +140,7 @@ class PdfAtelierApp:
     def __init__(self, root: Tk):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("1020x680")
+        self.root.geometry("1190x680")
         # Sans taille minimale, rien n'empeche de reduire la fenetre bien en
         # dessous de sa taille de contenu naturelle : a 480x320, les libelles
         # des 10 onglets se chevauchent/tronquent et le bouton d'action de
@@ -150,7 +150,7 @@ class PdfAtelierApp:
         # l'audit). La taille minimale reprend la taille par defaut, deja
         # verifiee comme suffisante pour que tous les onglets restent
         # lisibles et cliquables.
-        self.root.minsize(1020, 680)
+        self.root.minsize(1190, 680)
 
         # Cache d'un seul PdfDocument pdfium a la fois, voir
         # _get_cached_pdfium_document (dimension 37 de l'audit) - ferme
@@ -184,7 +184,7 @@ class PdfAtelierApp:
         update_checker.start_update_check(APP_VERSION, UPDATE_REPO, self._update_check_queue)
         self.root.after(500, self._poll_update_check)
 
-        notebook = ttk.Notebook(self.root)
+        notebook = opl_theme.Rail(self.root)
         notebook.pack(fill=BOTH, expand=True, padx=8, pady=8)
 
         self.merge_tab = ttk.Frame(notebook)
@@ -199,15 +199,15 @@ class PdfAtelierApp:
         self.properties_tab = ttk.Frame(notebook)
         self.batch_tab = ttk.Frame(notebook)
 
-        notebook.add(self.merge_tab, text="Fusionner")
+        notebook.add(self.merge_tab, text="Fusionner", groupe="Assembler")
         notebook.add(self.split_tab, text="Diviser")
         notebook.add(self.pages_tab, text="Pages")
-        notebook.add(self.compress_tab, text="Compresser")
+        notebook.add(self.compress_tab, text="Compresser", groupe="Transformer")
         notebook.add(self.convert_tab, text="Convertir")
         notebook.add(self.watermark_tab, text="Filigrane")
         notebook.add(self.page_numbers_tab, text="Numeroter")
         notebook.add(self.protect_tab, text="Protection")
-        notebook.add(self.text_tab, text="Texte")
+        notebook.add(self.text_tab, text="Texte", groupe="Lire")
         notebook.add(self.properties_tab, text="Proprietes")
         notebook.add(self.batch_tab, text="Par lot")
 

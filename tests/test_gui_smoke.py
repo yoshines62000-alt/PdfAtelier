@@ -652,7 +652,10 @@ class GuiSmokeTestCase(unittest.TestCase):
         # contenu naturelle rendait certains boutons d'action totalement
         # inaccessibles (ex: onglet Compresser a 480x320) - bug trouve a
         # l'audit, reproductible a 100% sur un simple redimensionnement.
-        self.assertEqual(self.root.minsize(), (1020, 680))
+        # +170 px de large : c'est la largeur du rail de navigation, qui
+        # remplace la barre d'onglets horizontale. La zone de travail
+        # garde ainsi la largeur utile qu'elle avait.
+        self.assertEqual(self.root.minsize(), (1190, 680))
 
     # -- Coherence de mise en page entre onglets (point 17 de l'audit) -------------
 
