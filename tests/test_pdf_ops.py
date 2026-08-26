@@ -838,6 +838,31 @@ class PdfOpsTestCase(unittest.TestCase):
         self.assertEqual(ops.get_page_count(protected, password="hunter2"), 1)
         self.assertIn("Secret", ops.extract_text(protected, password="hunter2")[0])
 
+    def test_set_metadata_ne_retrograde_pas_le_chiffrement_en_rc4(self):
+        """Editer les metadonnees d'un PDF protege ne doit pas AFFAIBLIR sa
+        protection. set_metadata re-chiffre le fichier de sortie ; sans
+        algorithm= explicite, pypdf retombe sur RC4-128 (V=2, R=3) et un
+        document entre en AES-256 (V=5, R=6) ressortait moins bien chiffre
+        qu'a l'entree, sans aucun message - y compris via « Purger les
+        metadonnees », dont l'utilisateur attend l'inverse (bug trouve a
+        l'audit du 2026-08-26)."""
+        pdf = make_pdf(self.tmp / "doc.pdf", num_pages=1, labels=["Secret"])
+        protege = self.tmp / "protege.pdf"
+        ops.set_password(pdf, protege, user_password="hunter2")
+
+        sortie = self.tmp / "titre-corrige.pdf"
+        ops.set_metadata(protege, sortie, {"title": "Rapport"}, password="hunter2")
+
+        reader = PdfReader(str(sortie))
+        self.assertTrue(reader.is_encrypted, "la sortie doit rester protegee")
+        chiffrement = reader.trailer["/Encrypt"].get_object()
+        self.assertEqual(int(chiffrement["/V"]), 5, "V=2 signifie RC4 : protection retrogradee")
+        self.assertEqual(int(chiffrement["/R"]), 6)
+        self.assertEqual(int(chiffrement["/Length"]), 256)
+
+        # Et le fichier reste ouvrable avec le meme mot de passe.
+        self.assertEqual(ops.get_page_count(sortie, password="hunter2"), 1)
+
     def test_set_password_reprotects_an_already_protected_pdf(self):
         """L'onglet Protection permet de re-proteger un PDF deja protege
         (nouveau mot de passe) - `password=` est l'ancien mot de passe du

@@ -78,6 +78,11 @@ def _write_output(writer: PdfWriter, output_path: Path) -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             writer.write(f)
+            # os.replace ne rend atomique que le RENOMMAGE : sans flush+fsync,
+            # une coupure de courant peut laisser a l'emplacement final un PDF
+            # bien nomme et vide (constat C9 de l'audit du 2026-08-26).
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_name, output_path)
     except Exception:
         try:
@@ -634,7 +639,14 @@ def set_metadata(
     if non_empty:
         writer.add_metadata(non_empty)
     if reader.is_encrypted:
-        writer.encrypt(password, password)
+        # algorithm="AES-256" EXPLICITE, comme set_password plus bas : sans lui,
+        # pypdf retombe sur son defaut historique RC4-128, casse et retire de
+        # PDF 2.0. Un fichier source protege en AES-256 ressortait donc de
+        # « Enregistrer sous » / « Purger les metadonnees » MOINS bien chiffre
+        # qu'a l'entree, sans le moindre message (mesure a l'audit : /AESV3
+        # V=5 R=6 en entree, RC4 V=2 R=3 en sortie). Une operation sur les
+        # metadonnees n'a aucune raison d'affaiblir la protection du document.
+        writer.encrypt(password, password, algorithm="AES-256")
     _write_output(writer, output_path)
 
 
