@@ -154,6 +154,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         # eviter que la suite de tests ne reste figee en attente d'un clic
         # humain, tout en gardant une trace des messages pour les assertions.
         self.info_messages = []
+        self._statut_vu = ""
         self.warning_messages = []
         self.error_messages = []
         patches = [
@@ -211,7 +212,34 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.tmp_dir.cleanup()
 
     def _done(self):
+        # La barre d'etat compte comme un signal de fin au meme titre qu'une
+        # boite : depuis la refonte, les succes qui ne posaient aucune question
+        # y sont annonces au lieu d'ouvrir une modale. Sans elle, ce predicat
+        # attendait indefiniment un message qui n'arrive plus.
+        # ... mais elle GARDE son texte quelques secondes : un test qui
+        # enchaine deux operations verrait l'annonce de la PREMIERE et
+        # n'attendrait pas la seconde. On ne se declenche que sur un
+        # CHANGEMENT.
+        courant = self.app.statut.cget("text")
+        if courant and courant != self._statut_vu:
+            self._statut_vu = courant
+            return True
         return bool(self.info_messages or self.warning_messages or self.error_messages)
+
+    def _oublier_annonces(self):
+        """A appeler entre DEUX operations d'un meme test : sans cela, si la
+        seconde annonce exactement le meme texte que la premiere, le predicat
+        de fin ne voit aucun changement et l'attente expire."""
+        self.info_messages.clear()
+        self.warning_messages.clear()
+        self.error_messages.clear()
+        self.app.statut.effacer()
+        self._statut_vu = ""
+
+    def _dit(self):
+        """Ce que l'application vient d'annoncer, quel qu'en soit le media."""
+        return self.info_messages + ([self.app.statut.cget("text")]
+                                     if self.app.statut.cget("text") else [])
 
     # -- Fusionner ----------------------------------------------------------------
 
@@ -238,7 +266,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertLess(click_duration, 1.0)
         self.assertTrue(output.exists())
         self.assertEqual(len(PdfReader(str(output)).pages), 5)
-        self.assertEqual(self.info_messages, [f"PDF fusionne enregistre : {output.name}"])
+        self.assertEqual(self._dit(), [f"PDF fusionne enregistre : {output.name}"])
         self.assertFalse(self.warning_messages or self.error_messages)
 
     # -- Diviser --------------------------------------------------------------
@@ -267,8 +295,8 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertEqual(len(generated), 2)
         self.assertEqual(len(PdfReader(str(generated[0])).pages), 2)
         self.assertEqual(len(PdfReader(str(generated[1])).pages), 3)
-        self.assertEqual(len(self.info_messages), 1)
-        self.assertIn("2 fichier(s) genere(s)", self.info_messages[0])
+        self.assertEqual(len(self._dit()), 1)
+        self.assertIn("2 fichier(s) genere(s)", self._dit()[0])
 
     # -- Pages ------------------------------------------------------------------
 
@@ -296,7 +324,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         reader = PdfReader(str(output))
         self.assertEqual(len(reader.pages), 2)
         self.assertEqual(reader.pages[0].rotation % 360, 90)
-        self.assertEqual(self.info_messages, [f"Document enregistre : {output.name}"])
+        self.assertEqual(self._dit(), [f"Document enregistre : {output.name}"])
 
     # -- Compresser (fichier unique) ---------------------------------------------
 
@@ -320,9 +348,9 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertLess(click_duration, 1.0)
         self.assertTrue(output.exists())
         self.assertEqual(len(PdfReader(str(output)).pages), 2)
-        self.assertEqual(len(self.info_messages), 1)
-        self.assertIn("1 fichier(s)", self.info_messages[0])
-        self.assertIn("compresse", self.info_messages[0])
+        self.assertEqual(len(self._dit()), 1)
+        self.assertIn("1 fichier(s)", self._dit()[0])
+        self.assertIn("compresse", self._dit()[0])
 
     # -- Convertir (PDF vers images) -----------------------------------------------
 
@@ -347,7 +375,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertEqual(len(self.warning_messages), 1)
         self.assertIn("Reglages invalides", self.warning_messages[0])
         self.assertIn("resolution", self.warning_messages[0].lower())
-        self.assertFalse(self.info_messages or self.error_messages)
+        self.assertFalse(self._dit() or self.error_messages)
         # Aucune image ne doit avoir ete produite : le traitement n'a jamais
         # ete lance.
         self.assertEqual(list(output_dir.iterdir()), [])
@@ -367,7 +395,7 @@ class GuiSmokeTestCase(unittest.TestCase):
 
         self.assertEqual(len(self.warning_messages), 1)
         self.assertIn("Reglages invalides", self.warning_messages[0])
-        self.assertFalse(self.info_messages or self.error_messages)
+        self.assertFalse(self._dit() or self.error_messages)
 
     def test_p2i_run_with_a_valid_dpi_still_converts_in_the_background(self):
         # Non-regression : la nouvelle validation ne doit pas bloquer un DPI
@@ -386,7 +414,7 @@ class GuiSmokeTestCase(unittest.TestCase):
 
         pump(self.root, self._done)
 
-        self.assertEqual(len(self.info_messages), 1)
+        self.assertEqual(len(self._dit()), 1)
         self.assertFalse(self.warning_messages or self.error_messages)
         self.assertEqual(len(list(output_dir.glob("*.png"))), 1)
 
@@ -410,8 +438,8 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertLess(click_duration, 1.0)
         self.assertTrue(output.exists())
         self.assertEqual(len(PdfReader(str(output)).pages), 3)
-        self.assertEqual(len(self.info_messages), 1)
-        self.assertIn("1 fichier(s)", self.info_messages[0])
+        self.assertEqual(len(self._dit()), 1)
+        self.assertIn("1 fichier(s)", self._dit()[0])
 
     # -- Protection (fichier unique) -----------------------------------------------
 
@@ -436,13 +464,14 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertTrue(protected.exists())
         reader = PdfReader(str(protected))
         self.assertTrue(reader.is_encrypted)
-        self.assertEqual(len(self.info_messages), 1)
-        self.assertIn("1 fichier(s)", self.info_messages[0])
+        self.assertEqual(len(self._dit()), 1)
+        self.assertIn("1 fichier(s)", self._dit()[0])
 
         # Round-trip : retirer le mot de passe qui vient d'etre applique.
-        self.info_messages.clear()
+        self._dit().clear()
         self.app.protect_sources = [protected]
         gui.PdfAtelierApp._reload_listbox(self.app.protect_listbox, self.app.protect_sources)
+        self._oublier_annonces()          # seconde operation du meme test
         self.app.protect_mode_var.set("remove")
         self.app.protect_password_var.set("secret123")
 
@@ -478,9 +507,9 @@ class GuiSmokeTestCase(unittest.TestCase):
         # _run_batch capture l'echec par fichier (n'interrompt jamais les
         # autres) : le resume s'affiche donc via showinfo (0 succes, 1
         # echec detaille dans le texte), pas via showerror/showwarning.
-        self.assertEqual(len(self.info_messages), 1)
-        self.assertIn("0 fichier(s)", self.info_messages[0])
-        self.assertIn("1 echec(s)", self.info_messages[0])
+        self.assertEqual(len(self._dit()), 1)
+        self.assertIn("0 fichier(s)", self._dit()[0])
+        self.assertIn("1 echec(s)", self._dit()[0])
 
     # -- Proprietes ---------------------------------------------------------------
 
@@ -506,7 +535,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         meta = ops.read_metadata(output)
         self.assertEqual(meta["title"], "Mon titre")
         self.assertEqual(meta["author"], "Un auteur")
-        self.assertEqual(self.info_messages, [f"Proprietes enregistrees : {output.name}"])
+        self.assertEqual(self._dit(), [f"Proprietes enregistrees : {output.name}"])
 
     def test_properties_purge_in_background_clears_fields_on_success(self):
         src = make_pdf(self.tmp / "meta2.pdf", num_pages=1)
@@ -560,8 +589,8 @@ class GuiSmokeTestCase(unittest.TestCase):
 
         self.assertLess(click_duration, 1.0)
         self.assertEqual(len(list(output_dir.glob("*.png"))), 1)
-        self.assertEqual(len(self.info_messages), 1)
-        self.assertIn("1 image(s)", self.info_messages[0])
+        self.assertEqual(len(self._dit()), 1)
+        self.assertIn("1 image(s)", self._dit()[0])
 
     def test_extract_attachments_run_in_background(self):
         writer = PdfWriter()
@@ -588,8 +617,8 @@ class GuiSmokeTestCase(unittest.TestCase):
         extracted = list(output_dir.glob("*.xml"))
         self.assertEqual(len(extracted), 1)
         self.assertEqual(extracted[0].read_bytes(), b"<xml>contenu</xml>")
-        self.assertEqual(len(self.info_messages), 1)
-        self.assertIn("1 piece(s) jointe(s)", self.info_messages[0])
+        self.assertEqual(len(self._dit()), 1)
+        self.assertIn("1 piece(s) jointe(s)", self._dit()[0])
 
     def test_attachments_tab_warns_before_opening_extracted_files(self):
         # Point 12 de l'audit : PdfAtelier n'ouvre jamais lui-meme les
@@ -643,7 +672,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertLess(click_duration, 1.0)
         self.assertTrue(output.exists())
         self.assertEqual(len(PdfReader(str(output)).pages), 1)
-        self.assertEqual(self.info_messages, [f"PDF genere : {output.name}"])
+        self.assertEqual(self._dit(), [f"PDF genere : {output.name}"])
 
     # -- Taille minimale de fenetre (point 16 de l'audit) --------------------------
 
@@ -847,10 +876,10 @@ class GuiSmokeTestCase(unittest.TestCase):
         # Les sources sont intactes (jamais modifiees en place).
         self.assertEqual(good1.read_bytes(), good1_bytes_before)
         # Recapitulatif : 2 reussites + l'echec nomme.
-        self.assertEqual(len(self.info_messages), 1)
-        self.assertIn("2 fichier(s)", self.info_messages[0])
-        self.assertIn("echec", self.info_messages[0])
-        self.assertIn("bad.pdf", self.info_messages[0])
+        self.assertEqual(len(self._dit()), 1)
+        self.assertIn("2 fichier(s)", self._dit()[0])
+        self.assertIn("echec", self._dit()[0])
+        self.assertIn("bad.pdf", self._dit()[0])
 
     def test_batch_run_compress_reports_aggregate_and_spares_sources(self):
         srcs = [make_pdf(self.tmp / f"c{i}.pdf", num_pages=1) for i in range(3)]
@@ -871,8 +900,8 @@ class GuiSmokeTestCase(unittest.TestCase):
             self.assertTrue(src.exists())
         # Le label de resultat agrege affiche une comparaison de taille.
         self.assertIn("->", self.app.batch_result_var.get())
-        self.assertEqual(len(self.info_messages), 1)
-        self.assertIn("3 fichier(s)", self.info_messages[0])
+        self.assertEqual(len(self._dit()), 1)
+        self.assertIn("3 fichier(s)", self._dit()[0])
 
     def test_batch_run_watermark_uses_output_dir_and_chosen_suffix(self):
         srcs = [make_pdf(self.tmp / f"w{i}.pdf", num_pages=1) for i in range(2)]
@@ -985,7 +1014,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertIn(str(gui.LARGE_CONVERSION_PAGE_THRESHOLD + 1), mock_confirm.call_args[0][2])
         # Refuse : aucune image ne doit avoir ete produite.
         self.assertEqual(list(output_dir.iterdir()), [])
-        self.assertFalse(self.info_messages or self.warning_messages or self.error_messages)
+        self.assertFalse(self._dit() or self.warning_messages or self.error_messages)
 
     def test_p2i_run_does_not_warn_below_the_page_threshold(self):
         src = make_pdf(self.tmp / "petit.pdf", num_pages=1)
@@ -1004,7 +1033,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         pump(self.root, self._done)
 
         mock_confirm.assert_not_called()
-        self.assertEqual(len(self.info_messages), 1)
+        self.assertEqual(len(self._dit()), 1)
 
     # -- Mesure empirique de reactivite (methode de l'audit) -----------------------
 
@@ -1074,8 +1103,8 @@ class GuiSmokeTestCase(unittest.TestCase):
 
         self.assertTrue(output.exists())
         self.assertEqual(len(PdfReader(str(output)).pages), 1200)
-        self.assertEqual(len(self.info_messages), 1)
-        self.assertIn("1 fichier(s)", self.info_messages[0])
+        self.assertEqual(len(self._dit()), 1)
+        self.assertIn("1 fichier(s)", self._dit()[0])
 
 
 class DpiAwarenessTestCase(unittest.TestCase):

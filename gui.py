@@ -175,6 +175,11 @@ class PdfAtelierApp:
         self.update_status_var = StringVar(value="")
         self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground=opl_theme.couleur("texte_doux"))
         self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
+        # Ce qui s'est passe, SANS arreter l'utilisateur : un tiers des
+        # boites de cette suite ne posaient aucune question et n'annoncaient
+        # aucun echec — elles coutaient un clic pour dire « Termine ».
+        self.statut = opl_theme.Statut(bottom_bar)
+        self.statut.pack(side=LEFT, padx=(12, 0), pady=4)
         donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground=opl_theme.couleur("lien"), cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
@@ -1090,7 +1095,9 @@ class PdfAtelierApp:
                 return ops.split_pdf_every_n_pages(self.split_source_path, n, output_dir, base_name, password=password)
 
         def on_success(result):
-            messagebox.showinfo(APP_TITLE, f"{len(result)} fichier(s) genere(s) dans {output_dir}")
+            self.statut.dire(
+                f"{len(result)} fichier(s) genere(s) dans {output_dir}",
+                ton="succes")
 
         self._run_safely_in_background(action, on_success)
 
@@ -1234,7 +1241,9 @@ class PdfAtelierApp:
             messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
             return
         if not self.page_state:
-            messagebox.showwarning(APP_TITLE, "Il ne reste plus aucune page a enregistrer.")
+            self.statut.dire(
+                "Il ne reste plus aucune page a enregistrer.",
+                ton="alerte")
             return
         output = self._save_pdf_as("pages_modifiees.pdf")
         if not output:
@@ -1564,7 +1573,9 @@ class PdfAtelierApp:
                 else:
                     messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
                 return
-            messagebox.showinfo(APP_TITLE, f"{len(result)} image(s) generee(s) dans {output_dir}")
+            self.statut.dire(
+                f"{len(result)} image(s) generee(s) dans {output_dir}",
+                ton="succes")
 
         self._run_in_background_with_progress(work, on_done)
 
@@ -1592,9 +1603,13 @@ class PdfAtelierApp:
         # residuel trouve a l'audit, jamais migre lors du round precedent).
         def on_success(result):
             if not result:
-                messagebox.showinfo(APP_TITLE, "Aucune image embarquee trouvee dans ce PDF.")
+                self.statut.dire(
+                    "Aucune image embarquee trouvee dans ce PDF.",
+                    ton="info")
             else:
-                messagebox.showinfo(APP_TITLE, f"{len(result)} image(s) extraite(s) dans {output_dir}")
+                self.statut.dire(
+                    f"{len(result)} image(s) extraite(s) dans {output_dir}",
+                    ton="info")
 
         self._run_safely_in_background(
             lambda: ops.extract_embedded_images(self.eei_source_path, output_dir, base_name, password=password),
@@ -1621,9 +1636,13 @@ class PdfAtelierApp:
         # pieces jointes gelait auparavant l'UI le temps de l'extraction.
         def on_success(result):
             if not result:
-                messagebox.showinfo(APP_TITLE, "Aucune piece jointe trouvee dans ce PDF.")
+                self.statut.dire(
+                    "Aucune piece jointe trouvee dans ce PDF.",
+                    ton="info")
             else:
-                messagebox.showinfo(APP_TITLE, f"{len(result)} piece(s) jointe(s) extraite(s) dans {output_dir}")
+                self.statut.dire(
+                    f"{len(result)} piece(s) jointe(s) extraite(s) dans {output_dir}",
+                    ton="info")
 
         self._run_safely_in_background(
             lambda: ops.extract_attachments(self.eea_source_path, output_dir, password=password),
@@ -2121,7 +2140,9 @@ class PdfAtelierApp:
     def _text_save(self):
         content = self.text_output.get("1.0", END).strip()
         if not content:
-            messagebox.showinfo(APP_TITLE, "Rien a enregistrer : extrayez d'abord le texte.")
+            self.statut.dire(
+                "Rien a enregistrer : extrayez d'abord le texte.",
+                ton="succes")
             return
         output = filedialog.asksaveasfilename(
             title="Enregistrer le texte", initialfile="texte_extrait.txt", defaultextension=".txt",
@@ -2130,7 +2151,9 @@ class PdfAtelierApp:
         if not output:
             return
         Path(output).write_text(content, encoding="utf-8")
-        messagebox.showinfo(APP_TITLE, f"Texte enregistre : {Path(output).name}")
+        self.statut.dire(
+            f"Texte enregistre : {Path(output).name}",
+            ton="succes")
 
     # -- onglet Proprietes (metadonnees) -----------------------------------------------
 
@@ -2418,7 +2441,9 @@ class PdfAtelierApp:
         self._reload_listbox(self.batch_listbox, self.batch_sources)
         self.batch_result_var.set("")
         if not candidates:
-            messagebox.showinfo(APP_TITLE, "Aucun fichier PDF trouve dans ce dossier.")
+            self.statut.dire(
+                "Aucun fichier PDF trouve dans ce dossier.",
+                ton="info")
         elif added == 0:
             messagebox.showinfo(APP_TITLE, "Aucun nouveau PDF ajoute (deja presents ou non lisibles).")
 
