@@ -292,7 +292,10 @@ class PdfAtelierApp:
             messagebox.showwarning(APP_TITLE, str(exc))
             return None
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {exc}")
+            opl_theme.message(
+                self.root, "Erreur inattendue",
+                f"Une erreur inattendue s'est produite : {exc}",
+                ton="erreur")
             return None
         if success_message:
             messagebox.showinfo(APP_TITLE, success_message)
@@ -315,7 +318,10 @@ class PdfAtelierApp:
         except ops.PdfOpsError:
             pass
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible de lire ce PDF : {exc}")
+            opl_theme.message(
+                self.root, "PDF illisible",
+                f"Impossible de lire ce PDF : {exc}",
+                ton="erreur")
             return None, None
 
         password = self._prompt_for_password(path.name)
@@ -327,7 +333,10 @@ class PdfAtelierApp:
             messagebox.showwarning(APP_TITLE, str(exc))
             return None, None
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible de lire ce PDF : {exc}")
+            opl_theme.message(
+                self.root, "PDF illisible",
+                f"Impossible de lire ce PDF : {exc}",
+                ton="erreur")
             return None, None
 
     @staticmethod
@@ -794,7 +803,10 @@ class PdfAtelierApp:
 
         def on_done(result, error):
             if error is not None:
-                messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
+                opl_theme.message(
+                    self.root, "Erreur inattendue",
+                    f"Une erreur inattendue s'est produite : {error}",
+                    ton="erreur")
                 return
             successes, failures = result
             self._show_batch_summary(successes, failures, verb)
@@ -830,7 +842,10 @@ class PdfAtelierApp:
                 if isinstance(error, ops.PdfOpsError):
                     messagebox.showwarning(APP_TITLE, str(error))
                 else:
-                    messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
+                    opl_theme.message(
+                        self.root, "Erreur inattendue",
+                        f"Une erreur inattendue s'est produite : {error}",
+                        ton="erreur")
                 return
             if on_success:
                 on_success(result)
@@ -1012,7 +1027,10 @@ class PdfAtelierApp:
         try:
             page_count = ops.get_page_count(self.split_source_path, password=self.split_source_password)
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible de lire ce PDF : {exc}")
+            opl_theme.message(
+                self.root, "PDF illisible",
+                f"Impossible de lire ce PDF : {exc}",
+                ton="erreur")
             return
 
         dialog = Toplevel(self.root)
@@ -1231,7 +1249,10 @@ class PdfAtelierApp:
         try:
             count = ops.get_page_count(self.pages_source_path, password=self.pages_source_password)
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible de lire ce PDF : {exc}")
+            opl_theme.message(
+                self.root, "PDF illisible",
+                f"Impossible de lire ce PDF : {exc}",
+                ton="erreur")
             return
         self.page_state = [{"page": i, "rotation": 0} for i in range(1, count + 1)]
         self._pages_reload_listbox()
@@ -1344,7 +1365,10 @@ class PdfAtelierApp:
 
         def on_done(result, error):
             if error is not None:
-                messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
+                opl_theme.message(
+                    self.root, "Erreur inattendue",
+                    f"Une erreur inattendue s'est produite : {error}",
+                    ton="erreur")
                 return
             successes, failures = result
             extra_note = None
@@ -1571,7 +1595,10 @@ class PdfAtelierApp:
                 if isinstance(error, ops.PdfOpsError):
                     messagebox.showwarning(APP_TITLE, str(error))
                 else:
-                    messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
+                    opl_theme.message(
+                        self.root, "Erreur inattendue",
+                        f"Une erreur inattendue s'est produite : {error}",
+                        ton="erreur")
                 return
             self.statut.dire(
                 f"{len(result)} image(s) generee(s) dans {output_dir}",
@@ -2556,7 +2583,10 @@ class PdfAtelierApp:
 
         def on_done(result, error):
             if error is not None:
-                messagebox.showerror(APP_TITLE, f"Une erreur inattendue s'est produite : {error}")
+                opl_theme.message(
+                    self.root, "Erreur inattendue",
+                    f"Une erreur inattendue s'est produite : {error}",
+                    ton="erreur")
                 return
             successes, failures = result
             extra_note = None
