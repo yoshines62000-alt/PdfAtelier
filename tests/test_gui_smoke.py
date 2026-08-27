@@ -190,11 +190,17 @@ class GuiSmokeTestCase(unittest.TestCase):
         self._statut_vu = ""
         self.warning_messages = []
         self.error_messages = []
+        self.theme_messages = []
         patches = [
             mock.patch("gui.messagebox.showinfo", side_effect=lambda *a, **k: self.info_messages.append(a[1] if len(a) > 1 else "")),
             mock.patch("gui.messagebox.showwarning", side_effect=lambda *a, **k: self.warning_messages.append(a[1] if len(a) > 1 else "")),
             mock.patch("gui.messagebox.showerror", side_effect=lambda *a, **k: self.error_messages.append(a[1] if len(a) > 1 else "")),
             mock.patch("gui.opl_theme.dialogue", return_value=True),
+            # Troisieme media : les comptes rendus qui ENUMERENT des echecs, et
+            # les erreurs de traitement PDF. Signature (parent, titre, texte).
+            mock.patch("gui.opl_theme.message",
+                       side_effect=lambda *a, **k: self.theme_messages.append(
+                           a[2] if len(a) > 2 else "")),
         ]
         for p in patches:
             p.start()
@@ -257,7 +263,8 @@ class GuiSmokeTestCase(unittest.TestCase):
         if courant and courant != self._statut_vu:
             self._statut_vu = courant
             return True
-        return bool(self.info_messages or self.warning_messages or self.error_messages)
+        return bool(self.info_messages or self.warning_messages or self.error_messages
+                    or self.theme_messages)
 
     def _oublier_annonces(self):
         """A appeler entre DEUX operations d'un meme test : sans cela, si la
@@ -266,13 +273,14 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.info_messages.clear()
         self.warning_messages.clear()
         self.error_messages.clear()
+        self.theme_messages.clear()
         self.app.statut.effacer()
         self._statut_vu = ""
 
     def _dit(self):
         """Ce que l'application vient d'annoncer, quel qu'en soit le media."""
-        return self.info_messages + ([self.app.statut.cget("text")]
-                                     if self.app.statut.cget("text") else [])
+        return (self.info_messages + self.theme_messages
+                + ([self.app.statut.cget("text")] if self.app.statut.cget("text") else []))
 
     # -- Fusionner ----------------------------------------------------------------
 

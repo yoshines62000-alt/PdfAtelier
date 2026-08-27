@@ -298,7 +298,9 @@ class PdfAtelierApp:
                 ton="erreur")
             return None
         if success_message:
-            messagebox.showinfo(APP_TITLE, success_message)
+            # Ces messages sont tous d'une ligne (« PDF fusionne enregistre :
+            # sortie.pdf ») : un constat apres une action demandee.
+            self.statut.dire(success_message, ton="succes")
         return result
 
     def _prompt_for_password(self, filename: str):
@@ -700,7 +702,15 @@ class PdfAtelierApp:
             lines.append(f"{len(failures)} echec(s) :")
             for source, message in failures:
                 lines.append(f"  - {source.name} : {message}")
-        messagebox.showinfo(APP_TITLE, "\n".join(lines))
+        # Deux natures dans une meme fonction : tout a reussi et le compte
+        # rendu tient sur une ligne ; ou il ENUMERE les echecs fichier par
+        # fichier, et il faut pouvoir les lire.
+        if failures or extra_note:
+            opl_theme.message(
+                self.root, "Traitement par lot termine", "\n".join(lines),
+                ton="alerte" if failures else "info")
+        else:
+            self.statut.dire(lines[0], ton="succes")
 
     def _run_in_background_with_progress(self, work, on_done, indeterminate=False):
         """Execute `work(report)` dans un thread separe pendant qu'une
@@ -851,7 +861,7 @@ class PdfAtelierApp:
             if on_success:
                 on_success(result)
             if success_message:
-                messagebox.showinfo(APP_TITLE, success_message)
+                self.statut.dire(success_message, ton="succes")
 
         self._run_in_background_with_progress(work, on_done, indeterminate=True)
 
