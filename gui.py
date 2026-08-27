@@ -289,7 +289,7 @@ class PdfAtelierApp:
         try:
             result = action()
         except ops.PdfOpsError as exc:
-            messagebox.showwarning(APP_TITLE, str(exc))
+            opl_theme.message(self.root, "Traitement impossible", str(exc), ton="erreur")
             return None
         except Exception as exc:
             opl_theme.message(
@@ -330,7 +330,7 @@ class PdfAtelierApp:
         try:
             return ops.get_page_count(path, password=password), password
         except ops.PdfOpsError as exc:
-            messagebox.showwarning(APP_TITLE, str(exc))
+            opl_theme.message(self.root, "PDF illisible", str(exc), ton="erreur")
             return None, None
         except Exception as exc:
             opl_theme.message(
@@ -840,7 +840,8 @@ class PdfAtelierApp:
         def on_done(result, error):
             if error is not None:
                 if isinstance(error, ops.PdfOpsError):
-                    messagebox.showwarning(APP_TITLE, str(error))
+                    opl_theme.message(self.root, "Traitement impossible", str(error),
+                                      ton="erreur")
                 else:
                     opl_theme.message(
                         self.root, "Erreur inattendue",
@@ -1617,7 +1618,8 @@ class PdfAtelierApp:
         def on_done(result, error):
             if error is not None:
                 if isinstance(error, ops.PdfOpsError):
-                    messagebox.showwarning(APP_TITLE, str(error))
+                    opl_theme.message(self.root, "Traitement impossible", str(error),
+                                      ton="erreur")
                 else:
                     opl_theme.message(
                         self.root, "Erreur inattendue",
@@ -2545,7 +2547,9 @@ class PdfAtelierApp:
                 "Aucun fichier PDF trouve dans ce dossier.",
                 ton="info")
         elif added == 0:
-            messagebox.showinfo(APP_TITLE, "Aucun nouveau PDF ajoute (deja presents ou non lisibles).")
+            self.statut.dire(
+                "Aucun nouveau PDF ajoute : deja presents, ou non lisibles.",
+                ton="info")
 
     def _batch_remove_selected(self):
         selection = self.batch_listbox.curselection()
