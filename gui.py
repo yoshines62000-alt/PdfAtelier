@@ -1094,7 +1094,10 @@ class PdfAtelierApp:
 
         # Ce dialogue n'a pas de barre d'etat : la consigne s'y affiche en
         # ligne, au-dessus des boutons, et marque la liste des pages.
-        erreur = opl_theme.Erreur(dialog)
+        # `apres` est OBLIGATOIRE ici : sans lui, `montrer()` fait un `pack()`
+        # nu, qui empile a la fin de l'ordre courant — donc sous les boutons,
+        # poses juste apres cette ligne.
+        erreur = opl_theme.Erreur(dialog, apres=body)
 
         actions = ttk.Frame(dialog)
         actions.pack(fill=X, padx=10, pady=(0, 10))
