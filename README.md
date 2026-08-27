@@ -84,10 +84,10 @@ python -m pip install -r requirements.txt
 
 ## Utilisation
 
-Chaque fonctionnalité a son propre onglet : choisissez un ou plusieurs
+Chaque fonctionnalité a sa propre vue : choisissez un ou plusieurs
 fichiers via le bouton dédié, réglez les options si besoin, puis cliquez sur
 le bouton d'action (Fusionner, Diviser, Compresser...) et choisissez où
-enregistrer le résultat. L'onglet **Pages** affiche un aperçu miniature de la
+enregistrer le résultat. La vue **Pages** affiche un aperçu miniature de la
 page sélectionnée pour vérifier avant d'enregistrer.
 
 ## Confidentialité
@@ -151,7 +151,7 @@ python -m unittest discover tests -v
 
 ```
 pdf_ops.py            # toute la logique PDF (pure, testable sans GUI)
-gui.py                 # interface graphique Tkinter (10 onglets)
+gui.py                 # interface graphique Tkinter (11 vues)
 tests/                 # tests automatises
 requirements.txt      # dependances (pypdf, pypdfium2, reportlab, Pillow)
 Lancer.vbs            # raccourci de lancement double-clic (sans console)
