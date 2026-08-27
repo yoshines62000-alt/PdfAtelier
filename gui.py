@@ -334,11 +334,12 @@ class PdfAtelierApp:
         output_resolved = self._resolve(output)
         source_list = sources if isinstance(sources, (list, tuple)) else [sources]
         if any(self._resolve(s) == output_resolved for s in source_list if s):
-            return messagebox.askyesno(
-                APP_TITLE,
-                "Le fichier de destination choisi est le meme que le fichier source.\n"
-                "Le fichier d'origine sera remplace par le resultat. Continuer ?",
-            )
+            return opl_theme.dialogue(
+                self.root, "Le fichier d'origine sera remplace",
+                "La destination choisie est le fichier source lui-meme. Son contenu "
+                "actuel sera ecrase par le resultat, et l'original ne sera plus "
+                "recuperable.",
+                confirmer="Remplacer l'original", danger=True)
         return True
 
     def _get_cached_pdfium_document(self, path, password):
@@ -558,11 +559,11 @@ class PdfAtelierApp:
         # la duree previsible se compte probablement en minutes, avec la
         # possibilite d'annuler pour reduire le lot ou ajuster ses reglages -
         # voir LARGE_BATCH_FILE_THRESHOLD.
-        if len(sources) > LARGE_BATCH_FILE_THRESHOLD and not messagebox.askyesno(
-            APP_TITLE,
-            f"Ce traitement porte sur {len(sources)} fichiers, cela peut prendre plusieurs minutes. "
-            "Continuer ?",
-        ):
+        if len(sources) > LARGE_BATCH_FILE_THRESHOLD and not opl_theme.dialogue(
+            self.root, "Traitement long",
+            f"Ce lot porte sur {len(sources)} fichiers : comptez plusieurs minutes. "
+            "L'application reste utilisable pendant ce temps.",
+            confirmer="Lancer le traitement"):
             return None
 
         output_dir = filedialog.askdirectory(title="Dossier de destination")
@@ -1531,11 +1532,11 @@ class PdfAtelierApp:
         except Exception:
             page_count = None
         if page_count is not None and page_count > LARGE_CONVERSION_PAGE_THRESHOLD:
-            if not messagebox.askyesno(
-                APP_TITLE,
-                f"Ce document compte {page_count} pages, la conversion peut prendre plusieurs minutes. "
-                "Continuer ?",
-            ):
+            if not opl_theme.dialogue(
+                self.root, "Conversion longue",
+                f"Ce document compte {page_count} pages : la conversion peut prendre "
+                "plusieurs minutes. L'application reste utilisable pendant ce temps.",
+                confirmer="Lancer la conversion"):
                 return
 
         # La conversion PDF->images peut prendre du temps sur un document de
@@ -2214,9 +2215,12 @@ class PdfAtelierApp:
         if not self.properties_source_path:
             messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
             return
-        if not messagebox.askyesno(
-            APP_TITLE, "Purger toutes les metadonnees (titre, auteur, sujet, mots-cles) de ce PDF ?",
-        ):
+        if not opl_theme.dialogue(
+            self.root, "Purger les metadonnees",
+            "Le titre, l'auteur, le sujet et les mots-cles seront retires du fichier "
+            "produit. Le PDF d'origine n'est pas touche : le resultat part dans un "
+            "nouveau fichier.",
+            confirmer="Purger les metadonnees"):
             return
         output = self._save_pdf_as(f"{self.properties_source_path.stem}_purge.pdf")
         if not output:
@@ -2505,11 +2509,11 @@ class PdfAtelierApp:
         # Meme avertissement de lot volumineux que _resolve_batch_outputs
         # (point 45 de l'audit) - ici l'onglet ecrit toujours dans un dossier
         # choisi, donc pas de branche fichier unique.
-        if len(sources) > LARGE_BATCH_FILE_THRESHOLD and not messagebox.askyesno(
-            APP_TITLE,
-            f"Ce traitement porte sur {len(sources)} fichiers, cela peut prendre plusieurs minutes. "
-            "Continuer ?",
-        ):
+        if len(sources) > LARGE_BATCH_FILE_THRESHOLD and not opl_theme.dialogue(
+            self.root, "Traitement long",
+            f"Ce lot porte sur {len(sources)} fichiers : comptez plusieurs minutes. "
+            "L'application reste utilisable pendant ce temps.",
+            confirmer="Lancer le traitement"):
             return
         output_dir = filedialog.askdirectory(title="Dossier de destination")
         if not output_dir:

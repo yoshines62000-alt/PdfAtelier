@@ -160,7 +160,7 @@ class GuiSmokeTestCase(unittest.TestCase):
             mock.patch("gui.messagebox.showinfo", side_effect=lambda *a, **k: self.info_messages.append(a[1] if len(a) > 1 else "")),
             mock.patch("gui.messagebox.showwarning", side_effect=lambda *a, **k: self.warning_messages.append(a[1] if len(a) > 1 else "")),
             mock.patch("gui.messagebox.showerror", side_effect=lambda *a, **k: self.error_messages.append(a[1] if len(a) > 1 else "")),
-            mock.patch("gui.messagebox.askyesno", return_value=True),
+            mock.patch("gui.opl_theme.dialogue", return_value=True),
         ]
         for p in patches:
             p.start()
@@ -934,11 +934,11 @@ class GuiSmokeTestCase(unittest.TestCase):
             make_pdf(src, num_pages=1)
 
         with mock.patch("gui.filedialog.askdirectory", return_value=str(self.tmp)) as mock_askdir, \
-                mock.patch("gui.messagebox.askyesno", return_value=True) as mock_confirm:
+                mock.patch("gui.opl_theme.dialogue", return_value=True) as mock_confirm:
             pairs = self.app._resolve_batch_outputs(sources, "resultat.pdf", "_suffixe")
 
         mock_confirm.assert_called_once()
-        self.assertIn(str(len(sources)), mock_confirm.call_args[0][1])
+        self.assertIn(str(len(sources)), mock_confirm.call_args[0][2])
         mock_askdir.assert_called_once()
         self.assertEqual(len(pairs), len(sources))
 
@@ -948,7 +948,7 @@ class GuiSmokeTestCase(unittest.TestCase):
             make_pdf(src, num_pages=1)
 
         with mock.patch("gui.filedialog.askdirectory") as mock_askdir, \
-                mock.patch("gui.messagebox.askyesno", return_value=False):
+                mock.patch("gui.opl_theme.dialogue", return_value=False):
             pairs = self.app._resolve_batch_outputs(sources, "resultat.pdf", "_suffixe")
 
         self.assertIsNone(pairs)
@@ -961,7 +961,7 @@ class GuiSmokeTestCase(unittest.TestCase):
             make_pdf(src, num_pages=1)
 
         with mock.patch("gui.filedialog.askdirectory", return_value=str(self.tmp)), \
-                mock.patch("gui.messagebox.askyesno") as mock_confirm:
+                mock.patch("gui.opl_theme.dialogue") as mock_confirm:
             pairs = self.app._resolve_batch_outputs(sources, "resultat.pdf", "_suffixe")
 
         mock_confirm.assert_not_called()
@@ -976,13 +976,13 @@ class GuiSmokeTestCase(unittest.TestCase):
         output_dir = self.tmp / "out"
         output_dir.mkdir()
         with mock.patch("gui.filedialog.askdirectory", return_value=str(output_dir)), \
-                mock.patch("gui.messagebox.askyesno", return_value=False) as mock_confirm:
+                mock.patch("gui.opl_theme.dialogue", return_value=False) as mock_confirm:
             button = find_button(self.app.convert_tab, "Convertir en images...")
             self.assertIsNotNone(button)
             button.invoke()
 
         mock_confirm.assert_called_once()
-        self.assertIn(str(gui.LARGE_CONVERSION_PAGE_THRESHOLD + 1), mock_confirm.call_args[0][1])
+        self.assertIn(str(gui.LARGE_CONVERSION_PAGE_THRESHOLD + 1), mock_confirm.call_args[0][2])
         # Refuse : aucune image ne doit avoir ete produite.
         self.assertEqual(list(output_dir.iterdir()), [])
         self.assertFalse(self.info_messages or self.warning_messages or self.error_messages)
@@ -996,7 +996,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         output_dir = self.tmp / "out"
         output_dir.mkdir()
         with mock.patch("gui.filedialog.askdirectory", return_value=str(output_dir)), \
-                mock.patch("gui.messagebox.askyesno") as mock_confirm:
+                mock.patch("gui.opl_theme.dialogue") as mock_confirm:
             button = find_button(self.app.convert_tab, "Convertir en images...")
             self.assertIsNotNone(button)
             button.invoke()
