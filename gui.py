@@ -24,7 +24,7 @@ import update_checker
 
 APP_TITLE = "PdfAtelier"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 UPDATE_REPO = "yoshines62000-alt/PdfAtelier"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 PDF_FILETYPES = [("Fichiers PDF", "*.pdf")]
