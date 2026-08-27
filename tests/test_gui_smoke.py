@@ -647,6 +647,32 @@ class GuiSmokeTestCase(unittest.TestCase):
 
     # -- Taille minimale de fenetre (point 16 de l'audit) --------------------------
 
+    # -- erreurs de saisie EN LIGNE (refonte du 2026-08-26) ----------------
+
+    def test_un_filigrane_vide_s_affiche_sous_le_champ_et_non_en_modale(self):
+        self.app.watermark_sources.append(self.tmp / "x.pdf")
+        self.app.watermark_text_var.set("   ")
+        self.app._watermark_run()
+        self.assertTrue(self.app.watermark_erreur.visible, "l'erreur doit s'afficher en ligne")
+        self.assertEqual(self.warning_messages, [], "aucune fenetre modale ne doit s'ouvrir")
+        self.assertEqual(self.app.watermark_text_entry.cget("style"), "Erreur.TEntry")
+
+    def test_deux_mots_de_passe_differents_marquent_la_confirmation(self):
+        self.app.protect_sources.append(self.tmp / "x.pdf")
+        self.app.protect_mode_var.set("add")
+        self.app.protect_password_var.set("hunter2")
+        self.app.protect_confirm_var.set("hunter3")
+        self.app._protect_run()
+        self.assertTrue(self.app.protect_erreur.visible)
+        self.assertEqual(self.warning_messages, [])
+        self.assertEqual(self.app.protect_confirm_entry.cget("style"), "Erreur.TEntry")
+
+    def test_un_filigrane_renseigne_ne_declenche_aucune_erreur(self):
+        """Contre-epreuve : sans elle, une erreur toujours affichee passerait."""
+        self.app.watermark_text_var.set("CONFIDENTIEL")
+        self.app.watermark_erreur.effacer()
+        self.assertFalse(self.app.watermark_erreur.visible)
+
     def test_window_has_a_minimum_size_preventing_clipped_tabs_and_buttons(self):
         # Sans minsize, reduire la fenetre bien en dessous de sa taille de
         # contenu naturelle rendait certains boutons d'action totalement

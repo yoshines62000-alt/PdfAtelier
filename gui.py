@@ -1684,7 +1684,11 @@ class PdfAtelierApp:
         ttk.Button(buttons, text="Vider", command=self._watermark_clear).pack(fill=X, pady=2)
 
         ttk.Label(frame, text="Texte du filigrane").pack(anchor="w", padx=10, pady=(10, 0))
-        ttk.Entry(frame, textvariable=self.watermark_text_var, width=40).pack(anchor="w", padx=10)
+        self.watermark_text_entry = ttk.Entry(frame, textvariable=self.watermark_text_var, width=40)
+        self.watermark_text_entry.pack(anchor="w", padx=10)
+        # L'erreur reste sous le champ qu'elle nomme, pas dans une fenetre
+        # modale qui le masque et qu'il faut fermer avant de corriger.
+        self.watermark_erreur = opl_theme.Erreur(frame, apres=self.watermark_text_entry)
 
         ttk.Label(frame, text="Opacite (%)").pack(anchor="w", padx=10, pady=(10, 0))
         ttk.Scale(frame, from_=5, to=100, orient=HORIZONTAL, variable=self.watermark_opacity_var, length=300).pack(anchor="w", padx=10)
@@ -1720,8 +1724,12 @@ class PdfAtelierApp:
             return
         text = self.watermark_text_var.get().strip()
         if not text:
-            messagebox.showwarning(APP_TITLE, "Le texte du filigrane ne peut pas etre vide.")
+            self.watermark_erreur.montrer(
+                "Texte du filigrane",
+                "il faut un texte a apposer sur les pages — « CONFIDENTIEL », « BROUILLON »...",
+                champ=self.watermark_text_entry)
             return
+        self.watermark_erreur.effacer()
         pairs = self._resolve_batch_outputs(self.watermark_sources, "filigrane.pdf", "_filigrane")
         if pairs is None:
             return
@@ -1887,6 +1895,7 @@ class PdfAtelierApp:
         self.protect_confirm_label = ttk.Label(frame, text="Confirmer le mot de passe")
         self.protect_confirm_label.pack(anchor="w", padx=10, pady=(10, 0))
         self.protect_confirm_entry = ttk.Entry(frame, textvariable=self.protect_confirm_var, show="*", width=30)
+        self.protect_erreur = opl_theme.Erreur(frame, apres=self.protect_confirm_entry)
         self.protect_confirm_entry.pack(anchor="w", padx=10)
 
         ttk.Label(
@@ -1948,8 +1957,13 @@ class PdfAtelierApp:
 
         if mode == "add":
             if new_password != self.protect_confirm_var.get():
-                messagebox.showwarning(APP_TITLE, "Les deux mots de passe ne correspondent pas.")
+                self.protect_erreur.montrer(
+                    "Confirmation",
+                    "les deux mots de passe different. Ressaisissez-le a l'identique — "
+                    "un PDF protege par un mot de passe qu'on ignore ne se rouvre pas.",
+                    champ=self.protect_confirm_entry)
                 return
+            self.protect_erreur.effacer()
             if not self._protect_prompt_for_current_passwords():
                 return
             pairs = self._resolve_batch_outputs(self.protect_sources, "protege.pdf", "_protege")
