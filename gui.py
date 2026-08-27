@@ -168,7 +168,6 @@ class PdfAtelierApp:
             except Exception:
                 pass
 
-        opl_theme.entete(self.root, "PdfAtelier", "Boite a outils PDF", on_contact=lambda: opl_contact.ouvrir(self.root, app="PdfAtelier", version=APP_VERSION), slug="pdfatelier", version=APP_VERSION).pack(fill="x", side="top")
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
@@ -184,7 +183,12 @@ class PdfAtelierApp:
         update_checker.start_update_check(APP_VERSION, UPDATE_REPO, self._update_check_queue)
         self.root.after(500, self._poll_update_check)
 
-        notebook = opl_theme.Rail(self.root)
+        # UNE SEULE COLONNE a gauche : entete() rend le rail lui-meme —
+        # marque en haut, vues au milieu, Theme et Aide en bas.
+        notebook = opl_theme.entete(
+            self.root, "PdfAtelier", "Boite a outils PDF",
+            on_contact=lambda: opl_contact.ouvrir(self.root, app="PdfAtelier", version=APP_VERSION),
+            slug="pdfatelier", version=APP_VERSION)
         notebook.pack(fill=BOTH, expand=True, padx=8, pady=8)
 
         self.merge_tab = ttk.Frame(notebook)
