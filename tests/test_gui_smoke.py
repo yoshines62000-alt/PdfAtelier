@@ -400,10 +400,12 @@ class GuiSmokeTestCase(unittest.TestCase):
             self.assertIsNotNone(button)
             button.invoke()
 
-        self.assertEqual(len(self.warning_messages), 1)
-        self.assertIn("Reglages invalides", self.warning_messages[0])
-        self.assertIn("resolution", self.warning_messages[0].lower())
-        self.assertFalse(self._dit() or self.error_messages)
+        # L'erreur reste dans l'onglet, sous le reglage, et NOMME celui qui
+        # est fautif : le message vient du controle du code (un ValueError en
+        # francais), pas de Tcl.
+        self.assertTrue(self.app.p2i_erreur.visible)
+        self.assertIn("resolution", self.app.p2i_erreur.texte.lower())
+        self.assertFalse(self.warning_messages or self.error_messages)
         # Aucune image ne doit avoir ete produite : le traitement n'a jamais
         # ete lance.
         self.assertEqual(list(output_dir.iterdir()), [])
@@ -421,9 +423,9 @@ class GuiSmokeTestCase(unittest.TestCase):
             self.assertIsNotNone(button)
             button.invoke()
 
-        self.assertEqual(len(self.warning_messages), 1)
-        self.assertIn("Reglages invalides", self.warning_messages[0])
-        self.assertFalse(self._dit() or self.error_messages)
+        self.assertTrue(self.app.p2i_erreur.visible)
+        self.assertIn("resolution", self.app.p2i_erreur.texte.lower())
+        self.assertFalse(self.warning_messages or self.error_messages)
 
     def test_p2i_run_with_a_valid_dpi_still_converts_in_the_background(self):
         # Non-regression : la nouvelle validation ne doit pas bloquer un DPI
@@ -957,7 +959,8 @@ class GuiSmokeTestCase(unittest.TestCase):
 
         # Refuse avant meme de demander le dossier de destination.
         mock_askdir.assert_not_called()
-        self.assertTrue(any("filigrane" in m for m in self.warning_messages))
+        self.assertTrue(self.app.batch_erreur.visible)
+        self.assertIn("filigrane", self.app.batch_erreur.texte)
 
     def test_batch_add_folder_collects_pdfs_and_skips_duplicates(self):
         folder = self.tmp / "dossier"
@@ -981,7 +984,10 @@ class GuiSmokeTestCase(unittest.TestCase):
         with mock.patch("gui.filedialog.askdirectory") as mock_askdir:
             self.app._batch_run()
         mock_askdir.assert_not_called()
-        self.assertTrue(self.warning_messages)
+        # La consigne passe par la BARRE D'ETAT : aucun champ n'est fautif,
+        # l'utilisateur n'a simplement rien choisi. Un modal faisait payer un
+        # clic pour une phrase de six mots.
+        self.assertIn("fichier PDF", self.app.statut.cget("text"))
 
     # -- Avertissement avant un traitement volumineux (point 45 de l'audit) --------
 

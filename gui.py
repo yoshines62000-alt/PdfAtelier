@@ -933,7 +933,9 @@ class PdfAtelierApp:
 
     def _merge_run(self):
         if len(self.merge_files) < 2:
-            messagebox.showwarning(APP_TITLE, "Ajoutez au moins deux fichiers PDF a fusionner.")
+            self.statut.dire(
+                "Ajoutez au moins deux fichiers PDF a fusionner.",
+                ton="alerte")
             return
         output = self._save_pdf_as("fusion.pdf")
         if not output:
@@ -1022,7 +1024,9 @@ class PdfAtelierApp:
 
     def _split_open_visual_picker(self):
         if not self.split_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord un fichier PDF.",
+                ton="alerte")
             return
         try:
             page_count = ops.get_page_count(self.split_source_path, password=self.split_source_password)
@@ -1067,13 +1071,19 @@ class PdfAtelierApp:
         listbox.bind("<<ListboxSelect>>", on_select)
 
         def validate():
+            erreur.effacer()
             selection = listbox.curselection()
             if not selection:
-                messagebox.showwarning(APP_TITLE, "Selectionnez au moins une page.", parent=dialog)
+                erreur.montrer("Pages", "cochez au moins une page dans la liste.",
+                               champ=listbox)
                 return
             self.split_ranges_var.set(self._pages_to_range_string(index + 1 for index in selection))
             self.split_mode_var.set("ranges")
             dialog.destroy()
+
+        # Ce dialogue n'a pas de barre d'etat : la consigne s'y affiche en
+        # ligne, au-dessus des boutons, et marque la liste des pages.
+        erreur = opl_theme.Erreur(dialog)
 
         actions = ttk.Frame(dialog)
         actions.pack(fill=X, padx=10, pady=(0, 10))
@@ -1082,7 +1092,9 @@ class PdfAtelierApp:
 
     def _split_run(self):
         if not self.split_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord un fichier PDF.",
+                ton="alerte")
             return
         output_dir = filedialog.askdirectory(title="Dossier de destination")
         if not output_dir:
@@ -1259,7 +1271,9 @@ class PdfAtelierApp:
 
     def _pages_save(self):
         if not self.pages_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord un fichier PDF.",
+                ton="alerte")
             return
         if not self.page_state:
             self.statut.dire(
@@ -1314,7 +1328,11 @@ class PdfAtelierApp:
         ttk.Scale(frame, from_=1, to=95, orient=HORIZONTAL, variable=self.compress_quality_var, length=300).pack(anchor="w", padx=10)
 
         ttk.Label(frame, text="Dimension maximale des images (pixels)").pack(anchor="w", padx=10, pady=(15, 0))
-        ttk.Entry(frame, textvariable=self.compress_max_dim_var, width=10).pack(anchor="w", padx=10)
+        self.compress_max_dim_entry = ttk.Entry(frame, textvariable=self.compress_max_dim_var, width=10)
+        self.compress_max_dim_entry.pack(anchor="w", padx=10)
+
+        # L'erreur reste sous le reglage dont elle parle.
+        self.compress_erreur = opl_theme.Erreur(frame, apres=self.compress_max_dim_entry)
 
         ttk.Button(frame, text="Compresser...", command=self._compress_run).pack(anchor="w", padx=10, pady=15)
         ttk.Label(frame, textvariable=self.compress_result_var).pack(anchor="w", padx=10)
@@ -1338,7 +1356,9 @@ class PdfAtelierApp:
 
     def _compress_run(self):
         if not self.compress_sources:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord au moins un fichier PDF.",
+                ton="alerte")
             return
         pairs = self._resolve_batch_outputs(self.compress_sources, "compresse.pdf", "_compresse")
         if pairs is None:
@@ -1350,7 +1370,7 @@ class PdfAtelierApp:
             quality = self.compress_quality_var.get()
             max_dim = self.compress_max_dim_var.get()
         except Exception as exc:
-            messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+            self._reglage_non_numerique(self.compress_erreur, self.compress_max_dim_entry, exc)
             return
 
         def work(report):
@@ -1430,12 +1450,14 @@ class PdfAtelierApp:
         options = ttk.Frame(pdf_to_img)
         options.pack(fill=X, padx=5, pady=5)
         ttk.Label(options, text="Resolution (DPI)").pack(side=LEFT)
-        ttk.Entry(options, textvariable=self.p2i_dpi_var, width=6).pack(side=LEFT, padx=5)
+        self.p2i_dpi_entry = ttk.Entry(options, textvariable=self.p2i_dpi_var, width=6)
+        self.p2i_dpi_entry.pack(side=LEFT, padx=5)
         ttk.Label(options, text="Format").pack(side=LEFT, padx=(15, 0))
         ttk.Combobox(options, textvariable=self.p2i_format_var, values=["png", "jpg"], width=6, state="readonly").pack(side=LEFT, padx=5)
 
         quality_row = ttk.Frame(pdf_to_img)
         quality_row.pack(fill=X, padx=5, pady=(0, 5))
+        self.p2i_erreur = opl_theme.Erreur(pdf_to_img, apres=quality_row)
         ttk.Label(quality_row, text="Qualite JPEG (utilisee seulement pour le format jpg)").pack(side=LEFT)
         ttk.Scale(quality_row, from_=1, to=95, orient=HORIZONTAL, variable=self.p2i_quality_var, length=220).pack(side=LEFT, padx=5)
 
@@ -1522,7 +1544,9 @@ class PdfAtelierApp:
 
     def _p2i_run(self):
         if not self.p2i_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord un fichier PDF.",
+                ton="alerte")
             return
         output_dir = filedialog.askdirectory(title="Dossier de destination")
         if not output_dir:
@@ -1550,7 +1574,7 @@ class PdfAtelierApp:
             if dpi <= 0:
                 raise ValueError("la resolution (DPI) doit etre un nombre entier positif")
         except Exception as exc:
-            messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+            self._reglage_non_numerique(self.p2i_erreur, self.p2i_dpi_entry, exc)
             return
         password = self.p2i_password_var.get() or ""
 
@@ -1615,7 +1639,9 @@ class PdfAtelierApp:
 
     def _eei_run(self):
         if not self.eei_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord un fichier PDF.",
+                ton="alerte")
             return
         output_dir = filedialog.askdirectory(title="Dossier de destination")
         if not output_dir:
@@ -1652,7 +1678,9 @@ class PdfAtelierApp:
 
     def _eea_run(self):
         if not self.eea_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord un fichier PDF.",
+                ton="alerte")
             return
         output_dir = filedialog.askdirectory(title="Dossier de destination")
         if not output_dir:
@@ -1693,7 +1721,7 @@ class PdfAtelierApp:
 
     def _i2p_run(self):
         if not self.i2p_files:
-            messagebox.showwarning(APP_TITLE, "Ajoutez au moins une image.")
+            self.statut.dire("Ajoutez au moins une image.", ton="alerte")
             return
         output = self._save_pdf_as("images.pdf")
         if not output:
@@ -1771,7 +1799,9 @@ class PdfAtelierApp:
 
     def _watermark_run(self):
         if not self.watermark_sources:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord au moins un fichier PDF.",
+                ton="alerte")
             return
         text = self.watermark_text_var.get().strip()
         if not text:
@@ -1790,7 +1820,7 @@ class PdfAtelierApp:
             font_size = self.watermark_size_var.get()
             angle = self.watermark_angle_var.get()
         except Exception as exc:
-            messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+            self._reglage_non_numerique(self.watermark_erreur, self.watermark_text_entry, exc)
             return
 
         def make_action(source, output):
@@ -1844,7 +1874,9 @@ class PdfAtelierApp:
         row2 = ttk.Frame(frame)
         row2.pack(anchor="w", padx=10, pady=(10, 0))
         ttk.Label(row2, text="Format ({page} et {total} disponibles)").pack(side=LEFT)
-        ttk.Entry(row2, textvariable=self.page_numbers_format_var, width=20).pack(side=LEFT, padx=5)
+        self.page_numbers_format_entry = ttk.Entry(row2, textvariable=self.page_numbers_format_var, width=20)
+        self.page_numbers_format_entry.pack(side=LEFT, padx=5)
+        self.page_numbers_erreur = opl_theme.Erreur(frame, apres=row2)
 
         ttk.Button(frame, text="Numeroter les pages...", command=self._page_numbers_run).pack(anchor="w", padx=10, pady=15)
 
@@ -1864,18 +1896,41 @@ class PdfAtelierApp:
         self.page_numbers_passwords.clear()
         self._reload_listbox(self.page_numbers_listbox, self.page_numbers_sources)
 
+    def _reglage_non_numerique(self, erreur, champ=None, exc=None) -> None:
+        """Un reglage est refuse. Deux causes tres differentes partagent le
+        meme `except` dans ces onglets, et elles ne meritent pas le meme
+        message : un controle du code leve un ValueError dont le texte est en
+        francais et NOMME le reglage (« la resolution (DPI) doit etre un
+        nombre entier positif ») — on le garde tel quel. Une TclError, elle,
+        vient de Tcl et dit « expected floating-point number but got "abc" » :
+        illisible pour qui n'ecrit pas de Tcl, on la remplace."""
+        erreur.montrer(
+            "Reglages",
+            str(exc) if isinstance(exc, ValueError) else
+            "un reglage numerique de cet onglet ne contient pas un nombre. "
+            "Corrigez-le, puis relancez.",
+            champ=champ)
+
     def _page_numbers_run(self):
         if not self.page_numbers_sources:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord au moins un fichier PDF.",
+                ton="alerte")
             return
+        self.page_numbers_erreur.effacer()
         fmt = self.page_numbers_format_var.get().strip()
         if not fmt:
-            messagebox.showwarning(APP_TITLE, "Le format ne peut pas etre vide.")
+            self.page_numbers_erreur.montrer(
+                "Format", "indiquez ce qui doit s'ecrire sur chaque page, par exemple "
+                "« {page} / {total} ».", champ=self.page_numbers_format_entry)
             return
         try:
             fmt.format(page=1, total=1)
         except (KeyError, ValueError, IndexError, TypeError, AttributeError) as exc:
-            messagebox.showwarning(APP_TITLE, f"Format invalide : {exc}")
+            self.page_numbers_erreur.montrer(
+                "Format", f"ce format ne peut pas etre applique ({exc}). Les seules "
+                "valeurs reconnues sont « {page} » et « {total} ».",
+                champ=self.page_numbers_format_entry)
             return
         pairs = self._resolve_batch_outputs(self.page_numbers_sources, "numerote.pdf", "_numerote")
         if pairs is None:
@@ -1885,7 +1940,7 @@ class PdfAtelierApp:
             start_at = self.page_numbers_start_var.get()
             font_size = self.page_numbers_size_var.get()
         except Exception as exc:
-            messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+            self._reglage_non_numerique(self.page_numbers_erreur, self.page_numbers_format_entry, exc)
             return
         position = self.page_numbers_position_var.get()
 
@@ -1990,9 +2045,15 @@ class PdfAtelierApp:
             except ops.PdfOpsError:
                 current = self._prompt_for_password(source.name)
                 if not current:
-                    messagebox.showwarning(
-                        APP_TITLE, f"Mot de passe actuel requis pour re-proteger '{source.name}'.",
-                    )
+                    # L'utilisateur vient d'annuler la saisie du mot de passe :
+                    # aucun champ n'est fautif, c'est le traitement qui ne peut
+                    # pas avoir lieu, et il doit savoir sur quel fichier.
+                    opl_theme.message(
+                        self.root, "Fichier protege",
+                        f"« {source.name} » est deja protege par un mot de passe. Sans le mot "
+                        "de passe actuel, il ne peut pas etre re-protege : le traitement "
+                        "s'arrete ici.",
+                        ton="alerte")
                     return False
                 self.protect_current_passwords[resolved] = current
             except Exception:
@@ -2001,7 +2062,9 @@ class PdfAtelierApp:
 
     def _protect_run(self):
         if not self.protect_sources:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord au moins un fichier PDF.",
+                ton="alerte")
             return
         new_password = self.protect_password_var.get()
         mode = self.protect_mode_var.get()
@@ -2094,7 +2157,9 @@ class PdfAtelierApp:
 
     def _text_run(self):
         if not self.text_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord un fichier PDF.",
+                ton="alerte")
             return
         password = self.text_password_var.get() or None
 
@@ -2250,7 +2315,9 @@ class PdfAtelierApp:
 
     def _properties_save(self):
         if not self.properties_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord un fichier PDF.",
+                ton="alerte")
             return
         output = self._save_pdf_as(f"{self.properties_source_path.stem}_proprietes.pdf")
         if not output:
@@ -2267,7 +2334,9 @@ class PdfAtelierApp:
 
     def _properties_purge(self):
         if not self.properties_source_path:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord un fichier PDF.",
+                ton="alerte")
             return
         if not opl_theme.dialogue(
             self.root, "Purger les metadonnees",
@@ -2363,6 +2432,7 @@ class PdfAtelierApp:
         # empile mais un seul packe a la fois (voir _batch_update_options).
         self._batch_options_container = ttk.Frame(frame)
         self._batch_options_container.pack(fill=X, padx=10, pady=(8, 0))
+        self.batch_erreur = opl_theme.Erreur(frame, apres=self._batch_options_container)
         self._batch_option_frames = {
             BATCH_OP_COMPRESS: self._build_batch_compress_options(),
             BATCH_OP_WATERMARK: self._build_batch_watermark_options(),
@@ -2384,7 +2454,8 @@ class PdfAtelierApp:
         row = ttk.Frame(panel)
         row.pack(anchor="w", padx=8, pady=(6, 8))
         ttk.Label(row, text="Dimension maximale des images (pixels)").pack(side=LEFT)
-        ttk.Entry(row, textvariable=self.batch_compress_max_dim_var, width=10).pack(side=LEFT, padx=5)
+        self.batch_compress_max_dim_entry = ttk.Entry(row, textvariable=self.batch_compress_max_dim_var, width=10)
+        self.batch_compress_max_dim_entry.pack(side=LEFT, padx=5)
         return panel
 
     def _build_batch_watermark_options(self):
@@ -2392,7 +2463,8 @@ class PdfAtelierApp:
         row1 = ttk.Frame(panel)
         row1.pack(anchor="w", padx=8, pady=(6, 0))
         ttk.Label(row1, text="Texte du filigrane").pack(side=LEFT)
-        ttk.Entry(row1, textvariable=self.batch_wm_text_var, width=30).pack(side=LEFT, padx=5)
+        self.batch_wm_text_entry = ttk.Entry(row1, textvariable=self.batch_wm_text_var, width=30)
+        self.batch_wm_text_entry.pack(side=LEFT, padx=5)
         ttk.Label(panel, text="Opacite (%)").pack(anchor="w", padx=8, pady=(6, 0))
         ttk.Scale(panel, from_=5, to=100, orient=HORIZONTAL, variable=self.batch_wm_opacity_var, length=300).pack(anchor="w", padx=8)
         row2 = ttk.Frame(panel)
@@ -2419,7 +2491,8 @@ class PdfAtelierApp:
         row2 = ttk.Frame(panel)
         row2.pack(anchor="w", padx=8, pady=(6, 8))
         ttk.Label(row2, text="Format ({page} et {total} disponibles)").pack(side=LEFT)
-        ttk.Entry(row2, textvariable=self.batch_num_format_var, width=20).pack(side=LEFT, padx=5)
+        self.batch_num_format_entry = ttk.Entry(row2, textvariable=self.batch_num_format_var, width=20)
+        self.batch_num_format_entry.pack(side=LEFT, padx=5)
         return panel
 
     def _batch_update_options(self):
@@ -2502,12 +2575,13 @@ class PdfAtelierApp:
         action_for_pair(source, output) a passer a _run_batch, ou None si un
         reglage est invalide (un message a alors deja ete affiche). Chaque
         action delegue integralement a la fonction pdf_ops correspondante."""
+        self.batch_erreur.effacer()
         if operation == BATCH_OP_COMPRESS:
             try:
                 quality = self.batch_compress_quality_var.get()
                 max_dim = self.batch_compress_max_dim_var.get()
             except Exception as exc:
-                messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+                self._reglage_non_numerique(self.batch_erreur, self.batch_compress_max_dim_entry, exc)
                 return None
             return lambda source, output: ops.compress_pdf(
                 source, output, image_quality=quality, max_dimension=max_dim,
@@ -2516,14 +2590,17 @@ class PdfAtelierApp:
         if operation == BATCH_OP_WATERMARK:
             text = self.batch_wm_text_var.get().strip()
             if not text:
-                messagebox.showwarning(APP_TITLE, "Le texte du filigrane ne peut pas etre vide.")
+                self.batch_erreur.montrer(
+                    "Texte du filigrane",
+                    "indiquez le texte du filigrane a imprimer en travers des pages.",
+                    champ=self.batch_wm_text_entry)
                 return None
             try:
                 opacity = self.batch_wm_opacity_var.get() / 100.0
                 font_size = self.batch_wm_size_var.get()
                 angle = self.batch_wm_angle_var.get()
             except Exception as exc:
-                messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+                self._reglage_non_numerique(self.batch_erreur, self.batch_wm_text_entry, exc)
                 return None
             return lambda source, output: ops.add_text_watermark(
                 source, output, text, opacity=opacity, font_size=font_size, angle=angle,
@@ -2532,18 +2609,23 @@ class PdfAtelierApp:
         # BATCH_OP_NUMBER
         fmt = self.batch_num_format_var.get().strip()
         if not fmt:
-            messagebox.showwarning(APP_TITLE, "Le format ne peut pas etre vide.")
+            self.batch_erreur.montrer(
+                "Format", "indiquez ce qui doit s'ecrire sur chaque page, par exemple "
+                "« {page} / {total} ».", champ=self.batch_num_format_entry)
             return None
         try:
             fmt.format(page=1, total=1)
         except (KeyError, ValueError, IndexError, TypeError, AttributeError) as exc:
-            messagebox.showwarning(APP_TITLE, f"Format invalide : {exc}")
+            self.batch_erreur.montrer(
+                "Format", f"ce format ne peut pas etre applique ({exc}). Les seules "
+                "valeurs reconnues sont « {page} » et « {total} ».",
+                champ=self.batch_num_format_entry)
             return None
         try:
             start_at = self.batch_num_start_var.get()
             font_size = self.batch_num_size_var.get()
         except Exception as exc:
-            messagebox.showwarning(APP_TITLE, f"Reglages invalides : {exc}")
+            self._reglage_non_numerique(self.batch_erreur, self.batch_num_format_entry, exc)
             return None
         position = self.batch_num_position_var.get()
         return lambda source, output: ops.add_page_numbers(
@@ -2553,7 +2635,9 @@ class PdfAtelierApp:
 
     def _batch_run(self):
         if not self.batch_sources:
-            messagebox.showwarning(APP_TITLE, "Choisissez d'abord au moins un fichier PDF.")
+            self.statut.dire(
+                "Choisissez d'abord au moins un fichier PDF.",
+                ton="alerte")
             return
         operation = self.batch_operation_var.get()
         suffix, verb = self._BATCH_META[operation]
